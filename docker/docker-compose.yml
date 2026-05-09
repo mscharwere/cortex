@@ -1,0 +1,39 @@
+# CORTEX-Python — Phase 0 Item 1 compose definition.
+#
+# Phase 0 Item 1 ships only the cortex-python service. MariaDB schema +
+# Redis services land in Item 2 (per cortex_architecture.md v3.1 §F Phase
+# Table). Watchtower label included to match the family-app auto-deploy
+# convention (feedback_nexus_auto_deploy.md).
+
+version: "3.9"
+
+services:
+  cortex-python:
+    image: ghcr.io/mscharwere/cortex-python:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: America/Los_Angeles
+      # LiteLLM endpoint — canonical hostname per
+      # reference_ollama_perwnet_hostname.md. Item 4 wires this in earnest.
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://ollama.perwnet.com:4000}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+    ports:
+      - "8000:8000"
+    networks:
+      - cortex-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+networks:
+  cortex-net:
+    driver: bridge
