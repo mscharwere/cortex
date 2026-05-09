@@ -26,7 +26,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy package metadata first for better layer caching.
 COPY cortex_python/pyproject.toml ./cortex_python/pyproject.toml
-COPY README.md ./README.md
 COPY cortex_python ./cortex_python
 
 # Build the wheel into /build/dist.
