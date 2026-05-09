@@ -1,0 +1,58 @@
+name: Build and Push Docker Images
+
+# Mirrors familyOps / familyAuth docker-publish.yml pattern.
+# Single Python service for Phase 0 Item 1; MariaDB + Redis services in
+# docker-compose come Phase 0 Item 2 but are not built as images here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Build cortex-python (PR — build only, no push)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          tags: ${{ env.IMAGE_PREFIX }}/cortex-python:pr-${{ github.event.pull_request.number }}
+
+      - name: Build and push cortex-python (main — publish)
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/cortex-python:latest
+            ${{ env.IMAGE_PREFIX }}/cortex-python:sha-${{ steps.sha.outputs.short }}

@@ -1,0 +1,55 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+develop-eggs/
+.installed.cfg
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+
+# --- Virtualenvs ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Env / secrets ---
+.env
+.env.*
+!.env.example
+secrets.env
+/etc/cortex/
+
+# --- Docker artifacts ---
+*.pid
+*.sock
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- CORTEX-local ---
+/var/lib/cortex/
+*.sqlite
+*.sqlite-journal
