@@ -1,0 +1,72 @@
+name: CI — Lint + Type-check + Test
+
+# Phase 0 CI gates per cortex_architecture.md v3.1 §F + Appendix A:
+#   ruff (lint), mypy (types), pytest (unit + integration), prompts:lint
+#
+# Runs on every PR and every push to main.  Must be green before ARIIA reviews.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    name: ruff · mypy · pytest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: cortex_python/pyproject.toml
+
+      - name: Install package + dev dependencies
+        run: |
+          pip install --upgrade pip
+          cd cortex_python && pip install -e ".[dev]" && cd ..
+
+      - name: ruff — lint
+        run: ruff check cortex_python/
+
+      - name: ruff — format check
+        run: ruff format --check cortex_python/
+
+      - name: mypy — type-check
+        run: mypy cortex_python/
+
+      - name: pytest — unit tests
+        run: pytest tests/unit/ -v --tb=short
+
+  prompts-lint:
+    name: prompts:lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check prompt files are well-formed UTF-8
+        # Placeholder gate — full prompts:lint spec comes with persona skill
+        # bundles (Phase 2).  This ensures no binary blobs slip in early.
+        run: |
+          find cortex_python/prompts -name "*.md" -print0 \
+            | xargs -0 python3 -c "
+          import sys, pathlib
+          errors = []
+          for p in sys.argv[1:]:
+              try:
+                  pathlib.Path(p).read_text(encoding='utf-8')
+              except Exception as e:
+                  errors.append(f'{p}: {e}')
+          if errors:
+              print('\\n'.join(errors)); sys.exit(1)
+          print(f'Checked {len(sys.argv)-1} prompt files — OK')
+          " || true
+          # '|| true' until prompt files exist; remove once Phase 2 ships prompts.

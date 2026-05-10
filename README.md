@@ -15,7 +15,7 @@ This README is a getting-started crib, not the architecture document.
 git clone https://github.com/mscharwere/cortex.git && cd cortex
 
 # 2. Build + run via the Synology compose pattern (same shape as familyOps)
-cp .env.example docker/.env   # populate LITELLM_API_KEY etc. (Item 4)
+cp .env.example .env          # populate real secrets (Item 2 ships a complete .env.example)
 docker compose -f docker/docker-compose.yml up --build
 
 # 3. Smoke
@@ -30,7 +30,7 @@ See `feedback_nexus_auto_deploy.md` for the canonical family-app pattern.
 ## Repo layout
 
 See Appendix A in the architecture spec; the top-level matches it 1:1
-(`cortex_python/`, `docker/`, `schemas/`, `tests/`, `ops/`, `migrations/`,
+(`cortex_python/` (incl. `migrations/`), `docker/`, `schemas/`, `tests/`, `ops/`,
 `.github/workflows/`).
 
 ## Phase status
