@@ -1,30 +1,123 @@
-# CORTEX-Python — Phase 0 Item 1 compose definition.
+# CORTEX — Production docker-compose (Phase 0 Item 2)
 #
-# Phase 0 Item 1 ships only the cortex-python service. MariaDB schema +
-# Redis services land in Item 2 (per cortex_architecture.md v3.1 §F Phase
-# Table). Watchtower label included to match the family-app auto-deploy
-# convention (feedback_nexus_auto_deploy.md).
+# Three services: cortex-python (FastAPI brain), mariadb, redis.
+# Deploy path: Carlos copies this file + .env to /volume1/docker/cortex/ on the
+# Synology NAS, then `docker compose up -d`.  Watchtower auto-updates cortex-python
+# on new GHCR pushes (same pattern as familyOps, nexus, bookQuest).
+#
+# Secrets: sourced exclusively from .env — NO hardcoded credentials here.
+# .env is gitignored; .env.example (repo root) has placeholders.
+#
+# Spec: C:/Jarvis/Team/TARS/cortex_architecture.md v3.1 §4, Appendix A.
 
 version: "3.9"
 
+networks:
+  cortex-net:
+    driver: bridge
+    # Internal-only; mariadb + redis have NO host port exposure.
+
+volumes:
+  cortex-mariadb-data:
+    driver: local
+  cortex-redis-data:
+    driver: local
+
 services:
+  # ────────────────────────────────────────────────────────────────────────────
+  # MariaDB — CORTEX's durable state store (decision_log, ait_overflow_queue, …)
+  # ────────────────────────────────────────────────────────────────────────────
+  mariadb:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      TZ: America/Los_Angeles
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${MARIADB_DATABASE}
+      MARIADB_USER: ${MARIADB_USER}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+    volumes:
+      - cortex-mariadb-data:/var/lib/mysql
+    networks:
+      - cortex-net
+    # No host port — mariadb is internal to cortex-net only.
+    healthcheck:
+      test:
+        - "CMD"
+        - "healthcheck.sh"
+        - "--connect"
+        - "--innodb_initialized"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Redis — hot path: event streams, snapshot cache (TTL 30s), presence cache,
+  #         dedup keys.  Persistence: AOF for durability.
+  # ────────────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --appendfilename appendonly.aof
+      --save ""
+    volumes:
+      - cortex-redis-data:/data
+    networks:
+      - cortex-net
+    # No host port — redis is internal to cortex-net only.
+    healthcheck:
+      test:
+        - "CMD"
+        - "redis-cli"
+        - "-a"
+        - "${REDIS_PASSWORD}"
+        - "ping"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # CORTEX-Python — FastAPI brain (NAS side of the split topology).
+  # Pulls from GHCR; Watchtower auto-updates on push to main.
+  # ────────────────────────────────────────────────────────────────────────────
   cortex-python:
     image: ghcr.io/mscharwere/cortex-python:latest
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
     restart: unless-stopped
     env_file: .env
     environment:
       TZ: America/Los_Angeles
-      # LiteLLM endpoint — canonical hostname per
-      # reference_ollama_perwnet_hostname.md. Item 4 wires this in earnest.
+      # DATABASE_URL constructed from MARIADB_* vars so the value stays DRY.
+      # aiomysql async driver for the FastAPI app; pymysql sync for alembic.
+      DATABASE_URL: mysql+aiomysql://${MARIADB_USER}:${MARIADB_PASSWORD}@mariadb:3306/${MARIADB_DATABASE}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      # LiteLLM — canonical hostname per reference_ollama_perwnet_hostname.md
       LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://ollama.perwnet.com:4000}
-      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      LITELLM_API_KEY: ${LITELLM_API_KEY}
+      CORTEX_SECRET_KEY: ${CORTEX_SECRET_KEY}
+      CORTEX_ENV: ${CORTEX_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
-      - "8000:8000"
+      # cortex-python is the only service that exposes a host port.
+      # Reverse-proxy (Synology + Tailscale) fronts this; internal services
+      # (mariadb, redis) have no host exposure.
+      - "${CORTEX_PORT:-8000}:8000"
     networks:
       - cortex-net
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
       interval: 30s
@@ -33,7 +126,3 @@ services:
       start_period: 15s
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-
-networks:
-  cortex-net:
-    driver: bridge
