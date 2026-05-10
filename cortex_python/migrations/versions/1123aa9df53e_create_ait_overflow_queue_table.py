@@ -177,8 +177,8 @@ def downgrade() -> None:
         table_name="ait_overflow_queue",
     )
     op.drop_table("ait_overflow_queue")
-    with op.get_bind() as conn:
-        dialect = conn.dialect.name
-        if dialect == "postgresql":
-            op.execute(sa.text("DROP TYPE IF EXISTS overflow_status"))
-            op.execute(sa.text("DROP TYPE IF EXISTS overflow_priority"))
+    conn = op.get_bind()
+    dialect = conn.dialect.name
+    if dialect == "postgresql":
+        op.execute(sa.text("DROP TYPE IF EXISTS overflow_status"))
+        op.execute(sa.text("DROP TYPE IF EXISTS overflow_priority"))

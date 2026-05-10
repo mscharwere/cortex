@@ -28,12 +28,6 @@ jobs:
           cache-dependency-path: cortex_python/pyproject.toml
 
       - name: Install package + dev dependencies
-        # NOTE: cortex_python/pyproject.toml has where=["."] which looks for
-        # packages *inside* cortex_python/ — the correct package root is the
-        # repo root (cortex_python/ is the package, not a namespace prefix).
-        # Workaround: install deps from pyproject.toml then set PYTHONPATH
-        # so the repo root is on sys.path for imports.  The pyproject.toml
-        # package-find bug is tracked as a drift item for TARS (Item 1 scope).
         run: |
           pip install --upgrade pip
           cd cortex_python && pip install -e ".[dev]" && cd ..

@@ -159,8 +159,8 @@ def downgrade() -> None:
     op.drop_table("decision_log")
     # Enums must be dropped separately on PostgreSQL; MariaDB drops them with
     # the table but we call op.execute for portability.
-    with op.get_bind() as conn:
-        dialect = conn.dialect.name
-        if dialect == "postgresql":
-            op.execute(sa.text("DROP TYPE IF EXISTS decision_tier"))
-            op.execute(sa.text("DROP TYPE IF EXISTS decision_outcome"))
+    conn = op.get_bind()
+    dialect = conn.dialect.name
+    if dialect == "postgresql":
+        op.execute(sa.text("DROP TYPE IF EXISTS decision_tier"))
+        op.execute(sa.text("DROP TYPE IF EXISTS decision_outcome"))
