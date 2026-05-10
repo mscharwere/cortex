@@ -1,0 +1,53 @@
+# Shared Redis — family-app suite infrastructure
+#
+# THIS IS SHARED INFRASTRUCTURE — not part of CORTEX auto-deploy.
+# It lives independently at /volume1/docker/redis/ on the Synology NAS
+# and is brought up ONCE before any consuming app (CORTEX, future apps).
+#
+# Deploy:
+#   1. Copy this file + .env to /volume1/docker/redis/ on the NAS.
+#   2. docker compose up -d
+#
+# Per-app logical DB assignments (see README.md for the full table):
+#   DB 0 — reserved for ad-hoc / manual use
+#   DB 2 — CORTEX
+#   DB 1, 3–15 — available for future apps
+#
+# Password: REDIS_PASSWORD in .env here must match REDIS_PASSWORD in each
+# consuming app's .env (e.g. /volume1/docker/cortex/.env).
+
+version: "3.9"
+
+volumes:
+  redis-shared-data:
+    driver: local
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --appendfilename appendonly.aof
+      --save ""
+    volumes:
+      - redis-shared-data:/data
+    ports:
+      # LAN-exposed so all NAS containers can reach it at 192.168.30.4:6379,
+      # same way they reach MariaDB at 192.168.30.4:3306.
+      - "6379:6379"
+    healthcheck:
+      test:
+        - "CMD"
+        - "redis-cli"
+        - "-a"
+        - "${REDIS_PASSWORD}"
+        - "ping"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"

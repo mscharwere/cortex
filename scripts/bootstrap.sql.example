@@ -1,0 +1,21 @@
+-- CORTEX — one-time MariaDB bootstrap
+--
+-- Run ONCE against the shared MariaDB on the Synology NAS BEFORE starting
+-- cortex-python for the first time:
+--
+--   mysql -h 192.168.30.4 -u root -p < bootstrap.sql
+--
+-- Replace __DB_PASSWORD__ with the value of DB_PASS from your .env file.
+-- The real bootstrap.sql (gitignored) has the password filled in.
+--
+-- This script is idempotent (IF NOT EXISTS everywhere).
+
+CREATE DATABASE IF NOT EXISTS cortex
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+
+CREATE USER IF NOT EXISTS 'cortex'@'%' IDENTIFIED BY '__DB_PASSWORD__';
+
+GRANT ALL PRIVILEGES ON cortex.* TO 'cortex'@'%';
+
+FLUSH PRIVILEGES;
