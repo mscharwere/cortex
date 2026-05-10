@@ -53,3 +53,9 @@ Thumbs.db
 /var/lib/cortex/
 *.sqlite
 *.sqlite-journal
+
+# --- Scripts with real credentials (gitignored; .example is committed) ---
+scripts/bootstrap.sql
+
+# --- Infra .env files with real credentials ---
+infra/redis/.env
