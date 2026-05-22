@@ -54,6 +54,10 @@ WORKDIR /app
 COPY --from=builder /build/dist/*.whl /tmp/
 RUN pip install /tmp/*.whl && rm -f /tmp/*.whl
 
+# Copy alembic config + migrations so `alembic upgrade head` works inside the container
+COPY cortex_python/alembic.ini /app/alembic.ini
+COPY cortex_python/migrations /app/migrations
+
 EXPOSE 8000
 
 # uvicorn runs the FastAPI app declared in cortex_python/api/main.py.
