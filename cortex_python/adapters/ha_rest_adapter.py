@@ -20,7 +20,6 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §4 (ha_adapter)
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 
 import httpx

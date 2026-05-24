@@ -779,10 +779,12 @@ async def vacuumops_loop(settings: Settings) -> None:
     l1_timeout_count = 0  # consecutive ticks with L1 timeout
     last_dispatch_at: str | None = None
     consecutive_skip_reason: str | None = None
+    dispatched_this_tick: bool = False
 
     while True:
         tick_id = str(uuid.uuid4())
         tick_start = datetime.now(tz=timezone.utc)
+        dispatched_this_tick = False
 
         try:
             # Load patterns (hot-reload on mtime change)
@@ -891,6 +893,7 @@ async def vacuumops_loop(settings: Settings) -> None:
                         import pytz
                         pst = pytz.timezone("America/Los_Angeles")
                         last_dispatch_at = tick_start.astimezone(pst).isoformat()
+                        dispatched_this_tick = True
                         consecutive_skip_reason = None
                     except Exception as exc:
                         log.error(
@@ -905,7 +908,7 @@ async def vacuumops_loop(settings: Settings) -> None:
             # Publish loop status to HA
             loop_state = "dry_run" if vacuumops_cfg.dry_run else "healthy"
             last_decision = consecutive_skip_reason or (
-                "dispatch" if last_dispatch_at == tick_start.isoformat() else "defer"
+                "dispatch" if dispatched_this_tick else "defer"
             )
             await ha_adapter.publish_loop_status(
                 loop_state,
