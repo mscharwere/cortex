@@ -35,14 +35,14 @@ class RoomActivity:
     """Per-room activity rollup.
 
     Source: sensor.<room>_detected_activity (HA, Bayesian room-state) +
-    binary_sensor.<room>_occupancy.
+    binary_sensor.<room>_occupancy_status.
     """
 
     detected: str
     # "cooking" | "eating" | "sleeping" | "idle" | "active" | "unknown"
     confidence: float  # 0.0–1.0 from the detected_activity sensor
     raw_occupancy: bool
-    # binary_sensor.<room>_occupancy — instantaneous mmWave/Bayes occupancy.
+    # binary_sensor.<room>_occupancy_status — instantaneous mmWave/Bayes occupancy.
     # Apply 90s grace period before treating False as "truly clear".
 
 
