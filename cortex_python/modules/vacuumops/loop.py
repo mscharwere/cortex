@@ -24,26 +24,23 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §8
 from __future__ import annotations
 
 import asyncio
-import os
+import contextlib
 import uuid
 from collections import defaultdict
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
+import redis.asyncio as aioredis
 import structlog
 import yaml
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-import redis.asyncio as aioredis
-
 from cortex_python.adapters.litellm_client import build_litellm_client
 from cortex_python.config.settings import Settings
 from cortex_python.modules.vacuumops.config import VacuumOpsConfig
-from cortex_python.modules.vacuumops.utils import parse_pattern_time as _parse_pattern_time_util
 from cortex_python.modules.vacuumops.jobs import LitterBoxJob, VacuumJob
-from cortex_python.modules.vacuumops.l1 import L1Decision, run_l1
-from cortex_python.modules.vacuumops.noise import FLOOR_ROOM_MAP
+from cortex_python.modules.vacuumops.l1 import run_l1
 from cortex_python.modules.vacuumops.r0 import _ZONE_COOLDOWN_KEY as _R0_ZONE_COOLDOWN_KEY
 from cortex_python.modules.vacuumops.r0 import run_r0
 from cortex_python.modules.vacuumops.r1 import _ROBOT_COOLDOWN_KEY as _R1_ROBOT_COOLDOWN_KEY
@@ -55,6 +52,7 @@ from cortex_python.modules.vacuumops.schemas import (
     ZoneDecisionDetail,
     ZoneOutcome,
 )
+from cortex_python.modules.vacuumops.utils import parse_pattern_time as _parse_pattern_time_util
 
 log = structlog.get_logger()
 
@@ -93,7 +91,12 @@ def _load_prompt_template(job: VacuumJob) -> str:
         try:
             _PROMPT_FILES[job.job_id] = prompt_path.read_text(encoding="utf-8")
         except Exception as exc:
-            log.error("prompt_load_failed", job_id=job.job_id, path=str(prompt_path), error=str(exc))
+            log.error(
+                "prompt_load_failed",
+                job_id=job.job_id,
+                path=str(prompt_path),
+                error=str(exc),
+            )
             _PROMPT_FILES[job.job_id] = ""
     return _PROMPT_FILES[job.job_id]
 
@@ -464,10 +467,7 @@ async def dispatch_batch(
             break
 
     bundled_count = sum(1 for e in batch if e.bundled)
-    if bundled_count > 0:
-        reason = f"all_rules_pass+{bundled_count}_bundled"
-    else:
-        reason = "all_rules_pass"
+    reason = f"all_rules_pass+{bundled_count}_bundled" if bundled_count > 0 else "all_rules_pass"
 
     trigger_metadata = {
         "tick_id": tick_id,
@@ -708,7 +708,9 @@ async def persist_decision(
 # ── Adaptive interval ─────────────────────────────────────────────────────────
 
 
-def next_interval(ctx: ContextSnapshot | None, robot_states_active: bool, l1_timeout_count: int) -> int:
+def next_interval(
+    ctx: ContextSnapshot | None, robot_states_active: bool, l1_timeout_count: int
+) -> int:
     """Compute the next sleep interval in seconds.
 
     Spec: §8.2 cadence table
@@ -783,7 +785,7 @@ async def vacuumops_loop(settings: Settings) -> None:
 
     while True:
         tick_id = str(uuid.uuid4())
-        tick_start = datetime.now(tz=timezone.utc)
+        tick_start = datetime.now(tz=UTC)
         dispatched_this_tick = False
 
         try:
@@ -922,7 +924,7 @@ async def vacuumops_loop(settings: Settings) -> None:
 
         except Exception as exc:
             log.exception("loop_tick_failed", tick_id=tick_id)
-            try:
+            with contextlib.suppress(Exception):  # never let status publish kill the loop
                 await ha_adapter.publish_loop_status(
                     "error",
                     {
@@ -932,8 +934,6 @@ async def vacuumops_loop(settings: Settings) -> None:
                         "consecutive_skip_reason": str(exc),
                     },
                 )
-            except Exception:
-                pass  # never let status publish kill the loop
 
         # Adaptive sleep
         interval = next_interval(ctx, any_robot_cooldown, l1_timeout_count)

@@ -7,10 +7,9 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §3 + §7.4
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Literal, Optional
-
+from typing import Literal
 
 # ── Public context types (§3) ────────────────────────────────────────────────
 
@@ -25,9 +24,9 @@ class PersonActivity:
     activity: str
     # "exercising" | "home_idle" | "away" | "sleeping" | "school" | "unknown"
     confidence: float  # 0.0–1.0 from the Bayesian sensor's "probability" attribute
-    piano: Optional[bool] = None
+    piano: bool | None = None
     # Elena ONLY — sensor.elena_activity 'piano' attribute (live piano sensor)
-    sleep_confidence: Optional[float] = None
+    sleep_confidence: float | None = None
     # Kids ONLY — sensor.<kid>_activity 'sleep_confidence' attribute
 
 
@@ -57,9 +56,9 @@ class RobotState:
     state: str
     # "docked" | "cleaning" | "returning" | "error" | "paused" | "idle"
     battery_pct: int  # 0–100 from attributes.battery_level
-    current_zone: Optional[str] = None
+    current_zone: str | None = None
     # attributes.status parsed (or None when docked)
-    last_dock_at: Optional[datetime] = None
+    last_dock_at: datetime | None = None
     # last docked timestamp from HA history (used for cooldown)
 
 
@@ -76,7 +75,7 @@ class CalendarEvent:
     start: datetime
     end: datetime
     calendar_id: str  # which calendar entity it came from (debug + provenance)
-    owner: Optional[str] = None
+    owner: str | None = None
     # parsed where determinable: "carlos" | "elena" | "family" | etc.
 
 
@@ -96,32 +95,32 @@ class ContextSnapshot:
     home: dict  # parsed JSON from sensor.home_context (presence rollup, mode, etc.)
 
     # Per-person
-    people: Dict[str, PersonActivity]
+    people: dict[str, PersonActivity]
     # keys: "carlos" | "elena" | "carlitos" | "daniel" | "iestaf"
 
     # Per-room
-    rooms: Dict[str, RoomActivity]
+    rooms: dict[str, RoomActivity]
     # keys: "kitchen" | "living_room" | "master_bedroom" | "carlitos_room"
     # (Phase 1: these four. Phase 2 expands as Sam 2F module needs them.)
 
     # Zone scores — read from HomeOps, NOT cached longer than one tick (D1)
-    zone_scores: Dict[str, float]
+    zone_scores: dict[str, float]
     # keys: HomeOps zone_label, e.g. "Litter Box" → 78.3
 
     # Upcoming events (calendar)
-    upcoming_events: List[CalendarEvent]
+    upcoming_events: list[CalendarEvent]
     # next 2h window, sorted by start ascending
 
     # Robot state
-    robot_states: Dict[str, RobotState]
+    robot_states: dict[str, RobotState]
     # keys: "ethan" | "sam"
 
     # Derived (computed once when snapshot is built)
-    noise_budget: Optional[float] = None
+    noise_budget: float | None = None
     # 0–10 scale; computed by noise model (§6); None until noise step runs
-    quiet_hours_2f: Optional[bool] = None
+    quiet_hours_2f: bool | None = None
     # True if any 2F sleep zone occupied + in 9pm–8am
-    quiet_hours_1f: Optional[bool] = None
+    quiet_hours_1f: bool | None = None
     # True in 10pm–7am window
 
     # Degraded-context flags (§8.5)
@@ -143,7 +142,7 @@ class ZoneDecisionDetail:
     bundled: bool
     # True if included via bundle threshold (D11), NOT independently above
     # dispatch_threshold
-    l1_confidence: Optional[float] = None
+    l1_confidence: float | None = None
     # per-zone L1 confidence if L1 was reached; None for R0/R1 deferrals and
     # for bundled zones (D11)
 
@@ -154,19 +153,19 @@ class DecisionEntry:
 
     tick_id: str
     timestamp: str  # ISO8601 PST
-    zones: List[ZoneDecisionDetail]
+    zones: list[ZoneDecisionDetail]
     # For SKIP: contains the single zone that was evaluated (or dominant deferring zone).
     # For DISPATCH: contains all zones included in the mission.
     tier_reached: str  # "R0" | "R1" | "L1" — highest tier any zone reached
-    gate_failed: Optional[str]
+    gate_failed: str | None
     # non-null on SKIP/DEFER: "r0" | "effectiveness" | "comfort"
     # | "robot_cooldown" | "l1"; null on DISPATCH
     decision: str  # "dispatch" | "skip"
     reason: str  # short string (e.g. "all_rules_pass+1_bundled", "piano_active")
-    l1_confidence: Optional[float]
+    l1_confidence: float | None
     # only when tier_reached == "L1"; minimum confidence across zones (worst-case)
     dry_run: bool
-    dispatched_at: Optional[str] = None  # ISO8601 PST; null on SKIP
+    dispatched_at: str | None = None  # ISO8601 PST; null on SKIP
 
 
 # ── Internal loop types ───────────────────────────────────────────────────────
@@ -185,7 +184,7 @@ class ZoneOutcome:
     gate_failed: str  # "r0" | "effectiveness" | "comfort" | "robot_cooldown" | "l1" | "none"
     reason: str
     score: float = 0.0
-    l1_confidence: Optional[float] = None
+    l1_confidence: float | None = None
 
 
 @dataclass
@@ -198,7 +197,7 @@ class BatchEntry:
     zone: str  # zone label
     bundled: bool  # True if included via D11 bundle threshold
     score: float  # zone score at evaluation time
-    l1_confidence: Optional[float] = None
+    l1_confidence: float | None = None
     # None for bundled zones and R1-decided zones; populated for L1-decided zones
     passes: str = "auto"
     intensity: str = "auto"

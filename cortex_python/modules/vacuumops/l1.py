@@ -19,14 +19,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import timezone
-from typing import Any, Literal, Optional
+from datetime import UTC
+from typing import Any, Literal
 
 import httpx
+import redis.asyncio as aioredis
 import structlog
 from pydantic import BaseModel, Field
-
-import redis.asyncio as aioredis
 
 from cortex_python.config.settings import Settings
 from cortex_python.modules.vacuumops.jobs import VacuumJob
@@ -48,7 +47,7 @@ _L1_CACHE_KEY = "cortex:vacuumops:l1:litter_box:{context_hash}"
 _L1_CACHE_TTL = 600  # 10 minutes
 
 # PST timezone offset (UTC-7 during DST, UTC-8 otherwise — Carlos uses "PST" year-round)
-_PST = timezone.utc  # timestamps rendered as UTC; UI renders PST; loop renders PST in prompts
+_PST = UTC  # timestamps rendered as UTC; UI renders PST; loop renders PST in prompts
 
 
 class L1Decision(BaseModel):
@@ -57,7 +56,7 @@ class L1Decision(BaseModel):
     decision: Literal["dispatch", "defer"]
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str
-    defer_until_hint: Optional[str] = None
+    defer_until_hint: str | None = None
 
 
 def _build_context_hash(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> str:
@@ -118,10 +117,9 @@ def _render_prompt(
 
     Uses Jinja2 Environment to render {{ }} placeholders from the spec.
     """
-    from jinja2 import Environment, StrictUndefined
-
     # Build PST timestamp string (Carlos uses PST year-round)
     import pytz  # type: ignore[import]
+    from jinja2 import Environment, StrictUndefined
 
     pst = pytz.timezone("America/Los_Angeles")
     ts_pst = ctx.timestamp.astimezone(pst)

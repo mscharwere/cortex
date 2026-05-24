@@ -9,7 +9,6 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §5.1
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict
 
 
 @dataclass
@@ -27,7 +26,7 @@ class VacuumOpsConfig:
     # (JobDescriptor.cooldown_minutes). Default 120 min. May be overridden
     # per-robot via robot_cooldown_overrides.
     robot_cooldown_minutes: int = 120
-    robot_cooldown_overrides: Dict[str, int] = field(default_factory=dict)
+    robot_cooldown_overrides: dict[str, int] = field(default_factory=dict)
     # e.g. {"sam": 180} to give Sam a longer cooldown than Ethan.
 
     # Dry-run toggle (env: CORTEX_VACUUMOPS_DRY_RUN). When True, loop evaluates

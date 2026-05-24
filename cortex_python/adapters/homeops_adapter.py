@@ -14,9 +14,8 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §11
 
 from __future__ import annotations
 
-import structlog
-
 import httpx
+import structlog
 
 from cortex_python.config.settings import Settings
 from cortex_python.modules.vacuumops.schemas import DecisionEntry
@@ -110,7 +109,6 @@ class HomeOpsAdapter:
         Fire-and-forget. Logs errors but does NOT raise (spec: "log the error
         but do NOT abort the loop tick").
         """
-        import dataclasses
 
         payload = {
             "tick_id": entry.tick_id,

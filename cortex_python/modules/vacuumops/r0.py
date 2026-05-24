@@ -65,7 +65,9 @@ def score_above_threshold(
     if score is None:
         return False, f"zone_score_missing:{zone}"
     if score <= job.dispatch_threshold:
-        return False, f"score_below_threshold:{zone}:score={score:.1f}:threshold={job.dispatch_threshold}"
+        thresh = job.dispatch_threshold
+        reason = f"score_below_threshold:{zone}:score={score:.1f}:threshold={thresh}"
+        return False, reason
     return True, "r0_pass"
 
 

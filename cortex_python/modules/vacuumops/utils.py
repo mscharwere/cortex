@@ -6,7 +6,7 @@ r1.py needs _parse_pattern_time; loop.py also uses it.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 
 
 def parse_pattern_time(current_date: date, time_str: str) -> datetime:
@@ -21,4 +21,4 @@ def parse_pattern_time(current_date: date, time_str: str) -> datetime:
     h, m = [int(x) for x in time_str.split(":")]
     naive = datetime.combine(current_date, time(h, m))
     local = pst.localize(naive)
-    return local.astimezone(timezone.utc)
+    return local.astimezone(UTC)

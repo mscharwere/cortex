@@ -20,7 +20,7 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §7.2
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import redis.asyncio as aioredis
 

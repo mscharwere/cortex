@@ -22,13 +22,13 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §8.5
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from cortex_python.config.settings import Settings
-from cortex_python.modules.vacuumops.noise import FLOOR_ROOM_MAP, noise_budget
+from cortex_python.modules.vacuumops.noise import noise_budget
 from cortex_python.modules.vacuumops.schemas import (
     CalendarEvent,
     ContextSnapshot,
@@ -98,7 +98,7 @@ def _is_quiet_2f(now_pst_hour: int) -> bool:
 
 
 async def _fetch_person_activity(
-    ha_adapter: "HARestAdapter", name: str
+    ha_adapter: HARestAdapter, name: str
 ) -> PersonActivity:
     """Fetch PersonActivity for one person from HA REST."""
     entity_id = f"sensor.{name}_activity"
@@ -123,7 +123,7 @@ async def _fetch_person_activity(
 
 
 async def _fetch_room_activity(
-    ha_adapter: "HARestAdapter", room: str
+    ha_adapter: HARestAdapter, room: str
 ) -> RoomActivity | None:
     """Fetch RoomActivity for one room. Returns None if sensors unavailable."""
     occupancy_id = f"binary_sensor.{room}_occupancy"
@@ -160,7 +160,7 @@ async def _fetch_room_activity(
 
 
 async def _fetch_robot_state(
-    ha_adapter: "HARestAdapter", robot: str
+    ha_adapter: HARestAdapter, robot: str
 ) -> RobotState:
     """Fetch RobotState for one robot from HA REST."""
     entity_id = f"vacuum.{robot}"
@@ -183,7 +183,7 @@ async def _fetch_robot_state(
 
 
 async def _fetch_calendar_events(
-    ha_adapter: "HARestAdapter",
+    ha_adapter: HARestAdapter,
     now: datetime,
     window_hours: int = 2,
 ) -> tuple[list[CalendarEvent], bool]:
@@ -218,7 +218,9 @@ async def _fetch_calendar_events(
                     continue
 
                 start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-                end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00")) if end_str else start_dt
+                end_dt = (
+                    datetime.fromisoformat(end_str.replace("Z", "+00:00")) if end_str else start_dt
+                )
 
                 events.append(
                     CalendarEvent(
@@ -238,8 +240,8 @@ async def _fetch_calendar_events(
 
 async def build_snapshot(
     tick_id: str,
-    ha_adapter: "HARestAdapter",
-    homeops_adapter: "HomeOpsAdapter",
+    ha_adapter: HARestAdapter,
+    homeops_adapter: HomeOpsAdapter,
     settings: Settings,
 ) -> ContextSnapshot:
     """Build a ContextSnapshot for one loop tick.
@@ -247,7 +249,7 @@ async def build_snapshot(
     Fetches all required data, applies graceful degradation per §8.5.
     Raises if HomeOps zone scores are unavailable (caller skips tick).
     """
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
 
     # PST hour for quiet-hours flags
     import pytz
@@ -269,7 +271,6 @@ async def build_snapshot(
         log.warning("home_context_unavailable")
     else:
         try:
-            import json
             raw = home_state.get("attributes", {})
             home = {k: v for k, v in raw.items()}
         except Exception:
