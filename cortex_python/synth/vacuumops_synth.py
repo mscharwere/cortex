@@ -319,8 +319,8 @@ async def build_snapshot(
     # Check if any 2F bedroom is currently sleeping
     sleep_rooms = ("master_bedroom", "carlitos_room", "upper_hallway")
     for room_key in sleep_rooms:
-        room = rooms.get(room_key)
-        if room and room.detected == "sleeping":
+        room_act = rooms.get(room_key)
+        if room_act and room_act.detected == "sleeping":
             quiet_hours_2f = True
             break
 

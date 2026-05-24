@@ -30,6 +30,8 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.7",
     "mypy>=1.13",
+    "types-pytz>=2024.1",
+    "types-PyYAML>=6.0",
 ]
 
 [build-system]
