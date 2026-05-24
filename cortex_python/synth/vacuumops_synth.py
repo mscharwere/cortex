@@ -122,7 +122,7 @@ async def _fetch_person_activity(ha_adapter: HARestAdapter, name: str) -> Person
 
 async def _fetch_room_activity(ha_adapter: HARestAdapter, room: str) -> RoomActivity | None:
     """Fetch RoomActivity for one room. Returns None if sensors unavailable."""
-    occupancy_id = f"binary_sensor.{room}_occupancy"
+    occupancy_id = f"binary_sensor.{room}_occupancy_status"
     activity_id = f"sensor.{room}_detected_activity"
 
     occ_state = await ha_adapter.get_entity_state(occupancy_id)
