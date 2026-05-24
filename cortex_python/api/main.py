@@ -13,9 +13,9 @@ Spec: ``C:/Jarvis/Team/TARS/cortex_architecture.md`` (v3.1).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib import metadata
-from typing import AsyncIterator
 
 import structlog
 from fastapi import FastAPI

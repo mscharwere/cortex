@@ -11,7 +11,6 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §5
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
 
 
 @dataclass
@@ -24,7 +23,7 @@ class VacuumJob:
     # Identity
     job_id: str  # stable string, e.g. "litter_box_clean"
     robot: str  # "ethan" | "sam"
-    zones: List[str]  # HomeOps zone_label values (must exist in vac_zone_cleanliness)
+    zones: list[str]  # HomeOps zone_label values (must exist in vac_zone_cleanliness)
     floor: str = "1F"  # operating floor — used by floor_clearance_check
 
     # Noise model inputs (§6)
@@ -45,14 +44,14 @@ class VacuumJob:
     # — no L1 call. Logged as bundled=True in the decision entry.
 
     # Cleaning parameters (passed to HomeOps /api/vacuum/trigger)
-    cleaning_params: Dict[str, str] = field(default_factory=dict)
+    cleaning_params: dict[str, str] = field(default_factory=dict)
     # e.g. {"passes": "auto", "intensity": "auto"} — matches HomeOps schema
 
     # Decision config
     prompt_file: str = ""  # relative path under cortex_python/modules/vacuumops/prompts/
-    r0_checks: List[str] = field(default_factory=list)
+    r0_checks: list[str] = field(default_factory=list)
     # names of R0 predicate functions to run
-    r1_rules: List[str] = field(default_factory=list)
+    r1_rules: list[str] = field(default_factory=list)
     # names of R1 scored rules to run
     l1_required: bool = False
     # If True, L1 always runs after R0/R1 PASS (no shortcut).
@@ -72,7 +71,7 @@ class LitterBoxJob(VacuumJob):
 
     job_id: str = "litter_box_clean"
     robot: str = "ethan"
-    zones: List[str] = field(default_factory=lambda: ["Litter Box"])
+    zones: list[str] = field(default_factory=lambda: ["Litter Box"])
     floor: str = "1F"  # Ethan operates on 1F — floor_clearance_check scope
     noise_level: int = 1  # 1F, far from bedrooms — low-impact run
     noise_radius: str = "floor"  # only 1F context contributes to noise_acceptable
@@ -83,14 +82,14 @@ class LitterBoxJob(VacuumJob):
     cooldown_minutes: int = 240
     # 4 hours post-dispatch. Covers mission run + dock + post-clean settle +
     # reasonable resoil window. D9.
-    cleaning_params: Dict[str, str] = field(
+    cleaning_params: dict[str, str] = field(
         default_factory=lambda: {
             "passes": "auto",
             "intensity": "auto",
         }
     )
     prompt_file: str = "prompts/litter_box.md"
-    r0_checks: List[str] = field(
+    r0_checks: list[str] = field(
         default_factory=lambda: [
             "robot_docked",
             "battery_above_30",
@@ -99,7 +98,7 @@ class LitterBoxJob(VacuumJob):
             "not_in_cooldown",
         ]
     )
-    r1_rules: List[str] = field(
+    r1_rules: list[str] = field(
         default_factory=lambda: [
             # Effectiveness rules (hard FAIL on any → robot in the way)
             "zone_active_use_check",
