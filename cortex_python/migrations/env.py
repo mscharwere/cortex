@@ -33,6 +33,9 @@ if config.config_file_name is not None:
 # ---------------------------------------------------------------------------
 _db_url = os.environ.get("DATABASE_URL")
 if _db_url:
+    # Alembic uses a synchronous engine; swap the async aiomysql driver
+    # for the sync pymysql driver so migrations run correctly.
+    _db_url = _db_url.replace("mysql+aiomysql://", "mysql+pymysql://")
     config.set_main_option("sqlalchemy.url", _db_url)
 
 # ---------------------------------------------------------------------------
