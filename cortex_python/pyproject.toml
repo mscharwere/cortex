@@ -18,6 +18,10 @@ dependencies = [
     "pymysql>=1.1.0,<2.0",
     "alembic>=1.14",
     "redis>=5.2",
+    "pyyaml>=6.0",
+    "jinja2>=3.1",
+    "pytz>=2024.1",
+    "structlog>=24.1",
 ]
 
 [project.optional-dependencies]
@@ -37,7 +41,7 @@ where = [".."]
 include = ["cortex_python*"]
 
 [tool.setuptools.package-data]
-cortex_python = ["py.typed"]
+cortex_python = ["py.typed", "**/*.yaml", "**/*.md"]
 
 [tool.ruff]
 line-length = 100
