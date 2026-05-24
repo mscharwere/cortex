@@ -52,9 +52,7 @@ def battery_above_30(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[b
     return True, "r0_pass"
 
 
-def score_above_threshold(
-    job: VacuumJob, zone: str, ctx: ContextSnapshot
-) -> tuple[bool, str]:
+def score_above_threshold(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[bool, str]:
     """R0-3: Zone dirtiness score must exceed dispatch_threshold.
 
     Source: ctx.zone_scores[zone] > job.dispatch_threshold
@@ -71,9 +69,7 @@ def score_above_threshold(
     return True, "r0_pass"
 
 
-def not_in_active_mission(
-    job: VacuumJob, zone: str, ctx: ContextSnapshot
-) -> tuple[bool, str]:
+def not_in_active_mission(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[bool, str]:
     """R0-4: Robot must not be in an active mission state.
 
     Active states: cleaning | returning | error | paused

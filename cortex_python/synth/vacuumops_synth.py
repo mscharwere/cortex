@@ -68,9 +68,9 @@ _TRACKED_ROOMS = [
 
 # Quiet-hours windows (PST — compared after converting ctx.timestamp to PST)
 _QUIET_HOURS_1F_START = 22  # 10 PM
-_QUIET_HOURS_1F_END = 7     # 7 AM
+_QUIET_HOURS_1F_END = 7  # 7 AM
 _QUIET_HOURS_2F_START = 21  # 9 PM
-_QUIET_HOURS_2F_END = 8     # 8 AM
+_QUIET_HOURS_2F_END = 8  # 8 AM
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
@@ -97,9 +97,7 @@ def _is_quiet_2f(now_pst_hour: int) -> bool:
     return now_pst_hour >= _QUIET_HOURS_2F_START or now_pst_hour < _QUIET_HOURS_2F_END
 
 
-async def _fetch_person_activity(
-    ha_adapter: HARestAdapter, name: str
-) -> PersonActivity:
+async def _fetch_person_activity(ha_adapter: HARestAdapter, name: str) -> PersonActivity:
     """Fetch PersonActivity for one person from HA REST."""
     entity_id = f"sensor.{name}_activity"
     state = await ha_adapter.get_entity_state(entity_id)
@@ -122,9 +120,7 @@ async def _fetch_person_activity(
     )
 
 
-async def _fetch_room_activity(
-    ha_adapter: HARestAdapter, room: str
-) -> RoomActivity | None:
+async def _fetch_room_activity(ha_adapter: HARestAdapter, room: str) -> RoomActivity | None:
     """Fetch RoomActivity for one room. Returns None if sensors unavailable."""
     occupancy_id = f"binary_sensor.{room}_occupancy"
     activity_id = f"sensor.{room}_detected_activity"
@@ -144,8 +140,9 @@ async def _fetch_room_activity(
     if act_state is not None:
         detected = act_state.get("state", "unknown")
         confidence = _safe_float(
-            act_state.get("attributes", {}).get("probability",
-            act_state.get("attributes", {}).get("confidence", 0.0))
+            act_state.get("attributes", {}).get(
+                "probability", act_state.get("attributes", {}).get("confidence", 0.0)
+            )
         )
     elif occ_state is not None:
         # Only occupancy available — infer
@@ -159,9 +156,7 @@ async def _fetch_room_activity(
     )
 
 
-async def _fetch_robot_state(
-    ha_adapter: HARestAdapter, robot: str
-) -> RobotState:
+async def _fetch_robot_state(ha_adapter: HARestAdapter, robot: str) -> RobotState:
     """Fetch RobotState for one robot from HA REST."""
     entity_id = f"vacuum.{robot}"
     state = await ha_adapter.get_entity_state(entity_id)
@@ -253,6 +248,7 @@ async def build_snapshot(
 
     # PST hour for quiet-hours flags
     import pytz
+
     pst = pytz.timezone("America/Los_Angeles")
     now_pst_hour = now.astimezone(pst).hour
 
