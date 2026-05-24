@@ -631,7 +631,7 @@ async def persist_decision(
             reason = "no_zones_evaluated"
             zone_details = []
 
-    entry = DecisionEntry(
+    decision_entry = DecisionEntry(
         tick_id=tick_id,
         timestamp=ts_pst,
         zones=zone_details,
@@ -700,7 +700,7 @@ async def persist_decision(
 
     # 2. Write to HomeOps vac_decisions — fire-and-forget; log error but don't raise
     try:
-        await homeops_adapter.log_decision(entry)
+        await homeops_adapter.log_decision(decision_entry)
     except Exception as exc:
         log.error("homeops_decision_log_failed", tick_id=tick_id, error=str(exc))
 
