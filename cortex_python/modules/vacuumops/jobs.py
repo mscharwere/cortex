@@ -96,7 +96,7 @@ class LitterBoxJob(VacuumJob):
             "battery_above_30",
             "score_above_threshold",
             "not_in_active_mission",
-            "not_in_zone_cooldown",
+            "not_in_cooldown",
         ]
     )
     r1_rules: List[str] = field(

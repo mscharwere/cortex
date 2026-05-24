@@ -290,3 +290,24 @@ async def test_run_r1_piano_fails_comfort(litter_box_job, mock_redis):
     result, gate, reason = await run_r1(litter_box_job, "Litter Box", ctx, mock_redis)
     assert result == "FAIL"
     assert gate == "comfort"
+
+
+@pytest.mark.asyncio
+async def test_run_r1_ambiguous_when_effectiveness_pass_comfort_ambiguous(
+    litter_box_job, mock_redis
+):
+    """All effectiveness rules PASS, one comfort rule returns AMBIGUOUS → run_r1 returns AMBIGUOUS."""
+    from unittest.mock import patch
+
+    ctx = make_snapshot()  # all-clear context — effectiveness rules will PASS
+
+    # Patch noise_budget_check to return AMBIGUOUS (marginal noise scenario)
+    with patch(
+        "cortex_python.modules.vacuumops.r1.noise_budget_check",
+        return_value=("AMBIGUOUS", "comfort", "noise_marginal:impact=3.50:budget=4.00"),
+    ):
+        result, gate, reason = await run_r1(litter_box_job, "Litter Box", ctx, mock_redis)
+
+    assert result == "AMBIGUOUS"
+    assert gate == "comfort"
+    assert "noise_marginal" in reason

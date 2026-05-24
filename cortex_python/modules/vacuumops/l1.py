@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 from datetime import timezone
 from typing import Any, Literal, Optional
 
@@ -45,7 +44,7 @@ _L1_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=5.0)
 
 # Redis key template for L1 cache
 # cortex:vacuumops:l1:litter_box:<context_hash>
-_L1_CACHE_KEY = "cortex:vacuumops:l1:{job_id}:{context_hash}"
+_L1_CACHE_KEY = "cortex:vacuumops:l1:litter_box:{context_hash}"
 _L1_CACHE_TTL = 600  # 10 minutes
 
 # PST timezone offset (UTC-7 during DST, UTC-8 otherwise — Carlos uses "PST" year-round)
@@ -228,7 +227,7 @@ async def run_l1(
     """
     # Check Redis cache first
     context_hash = _build_context_hash(job, zone, ctx)
-    cache_key = _L1_CACHE_KEY.format(job_id=job.job_id, context_hash=context_hash)
+    cache_key = _L1_CACHE_KEY.format(context_hash=context_hash)
 
     try:
         cached = await redis_client.get(cache_key)
