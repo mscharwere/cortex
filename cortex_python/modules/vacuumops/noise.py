@@ -51,9 +51,7 @@ def noise_impact(job: VacuumJob, ctx: ContextSnapshot) -> float:
         # Use FLOOR_ROOM_MAP[job.floor] — same source as floor_clearance_check
         # so effectiveness and comfort gates reason over the same room set.
         floor_rooms = FLOOR_ROOM_MAP.get(job.floor, [])
-        active = sum(
-            1 for r in floor_rooms if ctx.rooms.get(r) and ctx.rooms[r].raw_occupancy
-        )
+        active = sum(1 for r in floor_rooms if ctx.rooms.get(r) and ctx.rooms[r].raw_occupancy)
         return base * (1.0 + 0.5 * active)  # +50% per occupied room on this floor
 
     if job.noise_radius == "house":
@@ -103,9 +101,7 @@ def noise_budget(ctx: ContextSnapshot) -> float:
 
     # Upcoming family-disruption events in next 30 min
     near_term_events = [
-        e
-        for e in ctx.upcoming_events
-        if (e.start - ctx.timestamp).total_seconds() < 1800
+        e for e in ctx.upcoming_events if (e.start - ctx.timestamp).total_seconds() < 1800
     ]
     if near_term_events:
         budget *= 0.60  # don't start a mission about to be interrupted

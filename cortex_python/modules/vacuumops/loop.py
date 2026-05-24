@@ -211,9 +211,7 @@ async def evaluate_zone(
 
     # R1 — two-gate rules
     try:
-        r1_result, r1_gate_failed, r1_reason = await run_r1(
-            job, zone, ctx, redis_client, patterns
-        )
+        r1_result, r1_gate_failed, r1_reason = await run_r1(job, zone, ctx, redis_client, patterns)
     except Exception as exc:
         log.exception("r1_error", job_id=job.job_id, zone=zone)
         return ZoneOutcome(
@@ -345,9 +343,7 @@ def _noise_acceptable_simple(job: VacuumJob, zone: str, ctx: ContextSnapshot) ->
     return result != "FAIL"
 
 
-async def _per_zone_cooldown_clear(
-    job: VacuumJob, zone: str, redis_client: aioredis.Redis
-) -> bool:
+async def _per_zone_cooldown_clear(job: VacuumJob, zone: str, redis_client: aioredis.Redis) -> bool:
     """Check if per-zone cooldown is clear (for bundle sweep)."""
     key = _R0_ZONE_COOLDOWN_KEY.format(job_id=job.job_id, zone_label=zone)
     exists = await redis_client.exists(key)
@@ -550,9 +546,7 @@ async def _set_robot_cooldown(
     log.debug("robot_cooldown_set", robot=robot, ttl_min=ttl_minutes)
 
 
-async def _robot_cooldown_active(
-    robot: str, redis_client: aioredis.Redis
-) -> bool:
+async def _robot_cooldown_active(robot: str, redis_client: aioredis.Redis) -> bool:
     """Check if per-robot cooldown is active."""
     key = _R1_ROBOT_COOLDOWN_KEY.format(robot=robot)
     return bool(await redis_client.exists(key))
@@ -686,14 +680,20 @@ async def persist_decision(
                 "superseded_by": None,
                 "notes": None,
             }
-            await session.execute(sa.text(
-                "INSERT INTO decision_log "
-                "(id, ts, tier, model, module, trigger_id, context_snapshot, "
-                "decision_payload, outcome, latency_ms, confidence, superseded_by, notes) "
-                "VALUES (:id, :ts, :tier, :model, :module, :trigger_id, :context_snapshot, "
-                ":decision_payload, :outcome, :latency_ms, :confidence, :superseded_by, :notes)"
-            ), {**row, "context_snapshot": json.dumps(row["context_snapshot"]),
-                "decision_payload": json.dumps(row["decision_payload"])})
+            await session.execute(
+                sa.text(
+                    "INSERT INTO decision_log "
+                    "(id, ts, tier, model, module, trigger_id, context_snapshot, "
+                    "decision_payload, outcome, latency_ms, confidence, superseded_by, notes) "
+                    "VALUES (:id, :ts, :tier, :model, :module, :trigger_id, :context_snapshot, "
+                    ":decision_payload, :outcome, :latency_ms, :confidence, :superseded_by, :notes)"
+                ),
+                {
+                    **row,
+                    "context_snapshot": json.dumps(row["context_snapshot"]),
+                    "decision_payload": json.dumps(row["decision_payload"]),
+                },
+            )
             await session.commit()
     except Exception as exc:
         log.error("decision_log_write_failed", tick_id=tick_id, error=str(exc))
@@ -893,14 +893,13 @@ async def vacuumops_loop(settings: Settings) -> None:
                         await _set_per_zone_cooldowns(batch, ACTIVE_JOBS, redis_client)
                         await _set_robot_cooldown(robot, vacuumops_cfg, redis_client)
                         import pytz
+
                         pst = pytz.timezone("America/Los_Angeles")
                         last_dispatch_at = tick_start.astimezone(pst).isoformat()
                         dispatched_this_tick = True
                         consecutive_skip_reason = None
                     except Exception as exc:
-                        log.error(
-                            "dispatch_failed", robot=robot, tick_id=tick_id, error=str(exc)
-                        )
+                        log.error("dispatch_failed", robot=robot, tick_id=tick_id, error=str(exc))
                 else:
                     # Track skip reason for loop status sensor
                     skip_reasons = [zo.reason for zo in zone_outcomes if zo.action == "defer"]

@@ -69,9 +69,7 @@ async def per_robot_cooldown_check(
 # ── Effectiveness rules ───────────────────────────────────────────────────────
 
 
-def zone_active_use_check(
-    job: VacuumJob, zone: str, ctx: ContextSnapshot
-) -> tuple[str, str, str]:
+def zone_active_use_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[str, str, str]:
     """R1-E1: Zone must not be actively occupied or in active use.
 
     Checks:
@@ -95,9 +93,7 @@ def zone_active_use_check(
     return "PASS", "none", "zone_clear"
 
 
-def floor_clearance_check(
-    job: VacuumJob, zone: str, ctx: ContextSnapshot
-) -> tuple[str, str, str]:
+def floor_clearance_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[str, str, str]:
     """R1-E2: Operating floor must be clear (no raw_occupancy across floor rooms).
 
     Checks every room in FLOOR_ROOM_MAP[job.floor]. The target zone's own
@@ -178,9 +174,7 @@ def transit_pattern_lookahead(
 # ── Comfort rules ─────────────────────────────────────────────────────────────
 
 
-def noise_budget_check(
-    job: VacuumJob, zone: str, ctx: ContextSnapshot
-) -> tuple[str, str, str]:
+def noise_budget_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[str, str, str]:
     """R1-C1: noise_impact must not exceed noise_budget.
 
     Result:
@@ -208,9 +202,7 @@ def noise_budget_check(
     return "FAIL", "comfort", reason
 
 
-def noise_radius_check(
-    job: VacuumJob, zone: str, ctx: ContextSnapshot
-) -> tuple[str, str, str]:
+def noise_radius_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[str, str, str]:
     """R1-C2: noise_radius must not overlap noise-sensitive zones.
 
     Noise-sensitive = a sleeping person's room or an active piano room.
@@ -334,9 +326,7 @@ def _dominant_budget_reducer(ctx: ContextSnapshot) -> str:
             return "eating_in_progress"
 
     near_term_events = [
-        e
-        for e in ctx.upcoming_events
-        if (e.start - ctx.timestamp).total_seconds() < 1800
+        e for e in ctx.upcoming_events if (e.start - ctx.timestamp).total_seconds() < 1800
     ]
     if near_term_events:
         return f"dinner_soon:{near_term_events[0].title}"
