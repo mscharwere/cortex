@@ -50,6 +50,14 @@ services:
       CORTEX_SECRET_KEY: ${CORTEX_SECRET_KEY}
       CORTEX_ENV: ${CORTEX_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # HomeOps integration
+      HOMEOPS_BASE_URL: ${HOMEOPS_BASE_URL:-http://192.168.30.4:4000}
+      CORTEX_API_KEY: ${CORTEX_API_KEY}
+      # Home Assistant
+      HOMEASSISTANT_URL: ${HOMEASSISTANT_URL:-https://homeassistant.perwnet.com:8123}
+      HOMEASSISTANT_TOKEN: ${HOMEASSISTANT_TOKEN}
+      # VacuumOps module
+      CORTEX_VACUUMOPS_DRY_RUN: ${CORTEX_VACUUMOPS_DRY_RUN:-true}
     ports:
       # cortex-python is the only service that exposes a host port.
       # Reverse-proxy (Synology + Tailscale) fronts this.

@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     cortex_secret_key: str  # HMAC / internal auth (§7 REST auth)
     cortex_env: str = "production"  # production | development
 
+    # ── HomeOps integration ────────────────────────────────────────────────────
+    homeops_base_url: str = "http://192.168.30.4:4000"
+    cortex_api_key: str = ""  # Bearer token for CORTEX → HomeOps calls
+
+    # ── Home Assistant ─────────────────────────────────────────────────────────
+    homeassistant_url: str = ""  # e.g. https://homeassistant.perwnet.com:8123
+    homeassistant_token: str = ""  # long-lived HA token
+
+    # ── VacuumOps module ───────────────────────────────────────────────────────
+    cortex_vacuumops_dry_run: bool = True  # Phase 1: dry-run by default
+
     # ── Service behaviour ──────────────────────────────────────────────────────
     log_level: str = "INFO"
 

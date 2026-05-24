@@ -1,0 +1,129 @@
+# VacuumOps household patterns — curated, not learned (D7).
+#
+# Seeded from Carlos's Node-RED patternMap (camera-pipeline contextualizer),
+# converted to YAML, with expected_events dropped and jobs / relevance fields
+# added. Times are PST. days follows ISO weekday convention (1=Monday, 7=Sunday).
+#
+# Per-job render — two-dimensional filter (§9):
+#   1. Job relevance: pattern.jobs includes job.job_id or "*"
+#   2. Temporal relevance: current_time falls within the asymmetric window
+#      for a pattern of this relevance type.
+#
+# Relevance types and their asymmetric look-ahead windows:
+#   transit: forward-biased [start - 15min, end + 5min] — warn early, clear quickly
+#   noise:   forward-biased [start - 20min, end + 5min]
+#   window:  symmetric      [start - 5min,  end + 5min] — you're in it or you're not
+#
+# Piano is NOT a static pattern — Elena's schedule varies; kids' Monday piano
+# class is in the M365 calendar. Any event with "piano" in the title within the
+# next 2h window collapses noise_budget. See noise.py noise_budget() for details.
+
+patterns:
+
+  # ── Morning transitions (transit — avoid) ──────────────────────────────────
+  - name: carlitos_morning_bus
+    days: [1, 2, 3, 4, 5]
+    start: "07:10"
+    end: "07:35"
+    description: "Carlos takes Carlitos to the school bus and returns home alone. Front door and hallway actively transited."
+    relevance: ["transit"]
+    jobs: ["*"]
+
+  - name: daniel_morning_bus
+    days: [1, 2, 3, 4, 5]
+    start: "08:20"
+    end: "08:40"
+    description: "Carlos takes Daniel to the school bus and returns. After this, house enters school-day quiet mode."
+    relevance: ["transit"]
+    jobs: ["*"]
+
+  # ── School day window (good dispatch window) ───────────────────────────────
+  - name: kids_school_window_mon_thu
+    days: [1, 2, 3, 4]
+    start: "08:40"
+    end: "15:05"
+    description: "Both kids at school. House quiet with only Elena and possibly Carlos present. Best window for all cleaning runs."
+    relevance: ["window"]
+    jobs: ["*"]
+
+  - name: kids_school_window_friday
+    days: [5]
+    start: "08:40"
+    end: "13:50"
+    description: "Both kids at school — Friday early release. Carlitos home ~13:50, Daniel ~14:30. Shorter window."
+    relevance: ["window"]
+    jobs: ["*"]
+
+  # ── Afternoon arrivals (transit — avoid) ──────────────────────────────────
+  - name: carlitos_school_arrival
+    days: [1, 2, 3, 4]
+    start: "15:05"
+    end: "15:30"
+    description: "Carlitos arrives home. Front door, hallway, and common areas actively transited. Backpack drop, kitchen visit typical."
+    relevance: ["transit"]
+    jobs: ["*"]
+
+  - name: carlitos_arrival_friday
+    days: [5]
+    start: "13:50"
+    end: "14:15"
+    description: "Carlitos arrives home early on Fridays."
+    relevance: ["transit"]
+    jobs: ["*"]
+
+  - name: elena_daniel_arrival
+    days: [1, 2, 3, 4]
+    start: "15:40"
+    end: "16:10"
+    description: "Elena picks up Daniel from school bus and returns home. 1F zones actively transited on arrival."
+    relevance: ["transit"]
+    jobs: ["*"]
+
+  - name: elena_daniel_arrival_friday
+    days: [5]
+    start: "14:30"
+    end: "15:05"
+    description: "Elena picks up Daniel — Friday early release."
+    relevance: ["transit"]
+    jobs: ["*"]
+
+  # ── Recurring absence/noise windows ───────────────────────────────────────
+  - name: carlos_costco_monday
+    days: [1]
+    start: "17:20"
+    end: "19:10"
+    description: "Carlos out at Costco. Elena and kids home — pre-dinner or dinner activity on 1F likely."
+    relevance: ["noise"]
+    jobs: ["*"]
+
+  - name: carlos_garbage_wednesday
+    days: [3]
+    start: "20:30"
+    end: "22:15"
+    description: "Carlos takes garbage out Wednesday evening. Family winding down — low noise budget already."
+    relevance: ["noise"]
+    jobs: ["*"]
+
+  # ── Meals (transit + noise) ────────────────────────────────────────────────
+  - name: family_lunch_weekday
+    days: [1, 2, 3, 4, 5]
+    start: "12:00"
+    end: "13:30"
+    description: "Family lunch around 12:30 PM on weekdays. Kitchen and dining area actively in use."
+    relevance: ["transit", "noise"]
+    jobs: ["*"]
+
+  - name: family_dinner
+    days: [1, 2, 3, 4, 5, 6, 7]
+    start: "16:00"
+    end: "18:30"
+    description: "Family dinner usually around 5 PM, varies. 1F kitchen and dining actively in use. Do not dispatch 1F jobs."
+    relevance: ["transit", "noise"]
+    jobs: ["*"]
+
+  # ── Piano — calendar-driven, not pattern-driven ────────────────────────────
+  # Elena's piano practice varies day-to-day; kids' piano class (Monday) is in
+  # the M365 calendar. CORTEX reads upcoming_events from the ContextSnapshot
+  # (calendar.* HA entities) — any event with "piano" in the title within the
+  # next 2h window should reduce noise_budget to near-zero (house-wide).
+  # Do NOT hardcode piano as a static pattern — rely on the calendar gate.
