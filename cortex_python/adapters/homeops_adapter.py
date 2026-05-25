@@ -113,6 +113,7 @@ class HomeOpsAdapter:
         payload = {
             "tick_id": entry.tick_id,
             "timestamp": entry.timestamp,
+            "robot": entry.robot,
             "zones": [
                 {
                     "label": z.label,
