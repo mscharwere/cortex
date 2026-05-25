@@ -634,6 +634,7 @@ async def persist_decision(
     decision_entry = DecisionEntry(
         tick_id=tick_id,
         timestamp=ts_pst,
+        robot=robot,
         zones=zone_details,
         tier_reached=tier_reached,
         gate_failed=gate_failed,
