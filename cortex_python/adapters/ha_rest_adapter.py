@@ -174,7 +174,10 @@ class HARestAdapter:
                 r.raise_for_status()
                 states = r.json()
                 return [
-                    s["entity_id"] for s in states if s.get("entity_id", "").startswith("calendar.")
+                    s["entity_id"]
+                    for s in states
+                    if s.get("entity_id", "").startswith("calendar.")
+                    and s.get("state") != "unavailable"
                 ]
             except Exception as exc:
                 log.error("ha_list_calendars_failed", error=str(exc))
