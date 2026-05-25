@@ -153,7 +153,7 @@ class DecisionEntry:
 
     tick_id: str
     timestamp: str  # ISO8601 PST
-    robot: str      # "ethan" | "sam" — which robot this decision applies to
+    robot: str  # "ethan" | "sam" — which robot this decision applies to
     zones: list[ZoneDecisionDetail]
     # For SKIP: contains the single zone that was evaluated (or dominant deferring zone).
     # For DISPATCH: contains all zones included in the mission.
