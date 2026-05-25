@@ -178,8 +178,7 @@ async def _fetch_robot_state(ha_adapter: HARestAdapter, robot: str) -> RobotStat
     else:
         # Fallback: try raw_state.batPct buried in vacuum entity attributes
         battery_pct = _safe_int(
-            attrs.get("battery_level")
-            or attrs.get("raw_state", {}).get("batPct", 0)
+            attrs.get("battery_level") or attrs.get("raw_state", {}).get("batPct", 0)
         )
 
     current_zone: str | None = attrs.get("status")
