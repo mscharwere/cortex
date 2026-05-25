@@ -166,7 +166,22 @@ async def _fetch_robot_state(ha_adapter: HARestAdapter, robot: str) -> RobotStat
 
     attrs = state.get("attributes", {})
     robot_state = state.get("state", "error")
-    battery_pct = _safe_int(attrs.get("battery_level", 0))
+
+    # Fetch dedicated battery sensor (more reliable than vacuum entity attribute).
+    # The Roomba HA integration does NOT expose battery_level on the vacuum entity
+    # top-level attributes — it is buried in raw_state.batPct.  The dedicated
+    # sensor.{robot}_battery entity is the canonical surface.
+    battery_entity_id = f"sensor.{robot}_battery"
+    battery_state = await ha_adapter.get_entity_state(battery_entity_id)
+    if battery_state is not None:
+        battery_pct = _safe_int(battery_state.get("state", 0))
+    else:
+        # Fallback: try raw_state.batPct buried in vacuum entity attributes
+        battery_pct = _safe_int(
+            attrs.get("battery_level")
+            or attrs.get("raw_state", {}).get("batPct", 0)
+        )
+
     current_zone: str | None = attrs.get("status")
 
     return RobotState(
