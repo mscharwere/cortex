@@ -51,15 +51,15 @@ _TRACKED_ROOMS = [
     "kitchen",
     "living_room",
     "master_bedroom",
-    "carlitos_room",
+    "carlos_room",
     # 1F full set from FLOOR_ROOM_MAP
     "hallway",
     "dining_room",
     "prep_area",
     "bathroom",
     # 2F
-    "master_bath",
-    "upper_hallway",
+    "master_bathroom",
+    "upper_hall",
     "kids_table_area",
     # 3F
     "office",
@@ -322,7 +322,7 @@ async def build_snapshot(
     quiet_hours_2f = _is_quiet_2f(now_pst_hour)
 
     # Check if any 2F bedroom is currently sleeping
-    sleep_rooms = ("master_bedroom", "carlitos_room", "upper_hallway")
+    sleep_rooms = ("master_bedroom", "carlos_room", "upper_hall")
     for room_key in sleep_rooms:
         room_act = rooms.get(room_key)
         if room_act and room_act.detected == "sleeping":
