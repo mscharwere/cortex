@@ -213,9 +213,14 @@ async def _fetch_calendar_events(
                     continue
 
                 start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=UTC)
+
                 end_dt = (
                     datetime.fromisoformat(end_str.replace("Z", "+00:00")) if end_str else start_dt
                 )
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=UTC)
 
                 events.append(
                     CalendarEvent(

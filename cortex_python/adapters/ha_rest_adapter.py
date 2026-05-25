@@ -109,8 +109,8 @@ class HARestAdapter:
         Returns a list of event dicts (may be empty).
         Returns [] on failure.
         """
-        start_str = start.strftime("%Y-%m-%dT%H:%M:%S")
-        end_str = end.strftime("%Y-%m-%dT%H:%M:%S")
+        start_str = start.isoformat()
+        end_str = end.isoformat()
         async with self._client() as client:
             try:
                 r = await client.get(
