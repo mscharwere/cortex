@@ -78,8 +78,8 @@ After deciding dispatch vs. defer, if dispatching, also choose two parameters:
 - Containment children: {{ zone_meta.child_zones | length }} (their dirtiness has been folded into this zone's score)
 
 **Signals**
-- Petivity dirtiness contribution (last 24h): {{ signals.petivity_24h_score | default("n/a") }}
-- Days since last clean: {{ signals.days_since_clean | default("n/a") }}
+- Petivity dirtiness contribution (last 24h): folded into zone_score below
+- Time since last clean: {{ time_since_last_clean }}
 - Current dirtiness score: {{ zone_score }}
 
 **Principles, not rules**

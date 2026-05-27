@@ -91,9 +91,20 @@ def _build_context_hash(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> str:
     room activities to one-decimal confidence, score rounded to int,
     upcoming-events titles+start-minute). Spec §7.3.
     """
+    # Resolve zone metadata for cache-key purposes using the same strategy as
+    # _render_prompt: Phase 1 has exactly one zone so first-entry is correct.
+    # floor_type and debris_profile are included so that a metadata change
+    # (e.g. floor type corrected in DB) busts the Redis cache rather than
+    # returning a stale L1Decision computed under the old profile.
+    _zm = next(iter(ctx.zone_metadata.values())) if ctx.zone_metadata else None
+
     subset: dict[str, Any] = {
         "zone": zone,
         "score": round(ctx.zone_scores.get(zone, 0.0)),
+        "zone_meta": {
+            "floor_type": _zm.floor_type if _zm else None,
+            "debris_profile": sorted(_zm.debris_profile) if (_zm and _zm.debris_profile) else [],
+        },
         "people": {
             name: {
                 "activity": p.activity,
