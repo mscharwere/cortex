@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from cortex_python.config.settings import Settings
 from cortex_python.modules.vacuumops.jobs import VacuumJob
 from cortex_python.modules.vacuumops.noise import noise_budget, noise_impact
-from cortex_python.modules.vacuumops.schemas import ContextSnapshot
+from cortex_python.modules.vacuumops.schemas import ContextSnapshot, ZoneMeta
 
 log = structlog.get_logger()
 
@@ -57,6 +57,31 @@ class L1Decision(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str
     defer_until_hint: str | None = None
+    # Cleaning parameters (dispatch params spec)
+    passes: Literal["auto", "single", "double"] | None = None
+    intensity: Literal["auto", "normal", "high"] | None = None
+    params_reason: str | None = None  # ≤120 chars
+
+
+def resolve_params(job: VacuumJob, l1: "L1Decision | None") -> tuple[str, str, str]:
+    """Resolve passes + intensity from L1 result, falling back to job defaults.
+
+    Returns (passes, intensity, source) where source is "l1" | "mixed" | "default".
+    """
+    default_passes = job.cleaning_params.get("passes", "auto")
+    default_intensity = job.cleaning_params.get("intensity", "auto")
+    if l1 is None:
+        return default_passes, default_intensity, "default"
+    p = l1.passes or default_passes
+    i = l1.intensity or default_intensity
+    src = (
+        "l1"
+        if (l1.passes and l1.intensity)
+        else "mixed"
+        if (l1.passes or l1.intensity)
+        else "default"
+    )
+    return p, i, src
 
 
 def _build_context_hash(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> str:
@@ -180,6 +205,20 @@ def _render_prompt(
             self.robot_states = ctx.robot_states
             self.upcoming_events = events
 
+    # Resolve ZoneMeta for this zone.
+    # zone_metadata is keyed by zone_id (int); ZoneMeta has no label field.
+    # Build a best-effort lookup: iterate values and return the first entry
+    # whose zone falls under the same unit, or just the first entry when only
+    # one zone is active (Phase 1). Falls back to a zero-id sentinel so the
+    # template always receives a valid ZoneMeta object.
+    zone_meta = ZoneMeta(zone_id=0, unit_id=0)  # fallback sentinel
+    if ctx.zone_metadata:
+        # Phase 1: exactly one zone ("Litter Box") — first entry is correct.
+        # Phase 2+: extend with a label field on ZoneMeta or a label→id index.
+        zone_meta = next(iter(ctx.zone_metadata.values()))
+
+    zone_score = ctx.zone_scores.get(zone)
+
     # Render
     tmpl = env.from_string(prompt_template)
     rendered = tmpl.render(
@@ -193,6 +232,8 @@ def _render_prompt(
         noise_impact=round(impact, 2),
         noise_budget=round(budget, 2),
         patterns_block=patterns_block,
+        zone_meta=zone_meta,
+        zone_score=zone_score,
     )
     return rendered
 
@@ -254,7 +295,7 @@ async def run_l1(
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.1,  # Low temperature — we want deterministic judgment
-        "max_tokens": 256,
+        "max_tokens": 512,  # Bumped from 256 — cleaning params section adds ~100 tokens
     }
 
     # Call LiteLLM

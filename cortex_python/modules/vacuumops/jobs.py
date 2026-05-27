@@ -109,5 +109,7 @@ class LitterBoxJob(VacuumJob):
             "noise_radius_check",
         ]
     )
-    l1_required: bool = False
-    # Litter Box is mostly rule-decidable; L1 only on ambiguity
+    l1_required: bool = True
+    # L1 always fires for LitterBoxJob — ensures cleaning params (passes/intensity)
+    # are selected from Petivity signal context. cleaning_params is the fallback
+    # if L1 is unreachable or declines to specify params.
