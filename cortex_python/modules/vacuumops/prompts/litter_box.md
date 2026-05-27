@@ -61,10 +61,12 @@ NEVER override R0 results (those are hard gates already evaluated upstream).
   "confidence": 0.0–1.0,
   "reason": "one-sentence justification grounded in the context above",
   "defer_until_hint": "optional PST timestamp or relative descriptor; null if dispatch",
-  "passes": "auto" | "single" | "double",
-  "intensity": "auto" | "normal" | "high",
-  "params_reason": "≤120 chars explaining the cleaning parameter choice"
+  "passes": "auto" | "single" | "double" | null,
+  "intensity": "auto" | "normal" | "high" | null,
+  "params_reason": "≤120 chars explaining the cleaning parameter choice" | null
 }
+
+If your decision is `defer`, omit `passes`, `intensity`, and `params_reason` or set them to `null`. These fields are only meaningful on a dispatch decision.
 
 ---
 
@@ -98,9 +100,11 @@ Reason about the physics: heavier suction helps when debris is dense or embedded
 
 **Output**
 
-In addition to your dispatch/defer JSON, include:
+If dispatching, include in your JSON:
 - `passes`: one of `auto | single | double`
 - `intensity`: one of `auto | normal | high`
 - `params_reason`: ≤120 chars explaining the choice in plain language
+
+If deferring, set `passes`, `intensity`, and `params_reason` to `null`.
 
 If you genuinely have no signal to prefer anything over `auto`, choose `auto` for both and say so. Do not invent specificity.

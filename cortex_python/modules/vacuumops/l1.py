@@ -63,6 +63,18 @@ class L1Decision(BaseModel):
     params_reason: str | None = None  # ≤120 chars
 
 
+def _resolve_zone_meta(zone_label: str, ctx: "ContextSnapshot") -> "ZoneMeta":
+    """Resolve ZoneMeta for a zone. Phase 1: single-zone, returns first entry.
+    Phase 2: match by label field once ZoneMeta.label is added."""
+    from .schemas import ZoneMeta
+
+    if not ctx.zone_metadata:
+        return ZoneMeta(zone_id=0, unit_id=0)
+    # Phase 1: single active zone — first (only) entry is correct
+    # Phase 2 TODO: match by zone_label when ZoneMeta gains a label field
+    return next(iter(ctx.zone_metadata.values()))
+
+
 def resolve_params(job: VacuumJob, l1: "L1Decision | None") -> tuple[str, str, str]:
     """Resolve passes + intensity from L1 result, falling back to job defaults.
 
@@ -91,19 +103,18 @@ def _build_context_hash(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> str:
     room activities to one-decimal confidence, score rounded to int,
     upcoming-events titles+start-minute). Spec §7.3.
     """
-    # Resolve zone metadata for cache-key purposes using the same strategy as
-    # _render_prompt: Phase 1 has exactly one zone so first-entry is correct.
+    # Resolve zone metadata for cache-key purposes using the shared helper.
     # floor_type and debris_profile are included so that a metadata change
     # (e.g. floor type corrected in DB) busts the Redis cache rather than
     # returning a stale L1Decision computed under the old profile.
-    _zm = next(iter(ctx.zone_metadata.values())) if ctx.zone_metadata else None
+    _zm = _resolve_zone_meta(zone, ctx)
 
     subset: dict[str, Any] = {
         "zone": zone,
         "score": round(ctx.zone_scores.get(zone, 0.0)),
         "zone_meta": {
-            "floor_type": _zm.floor_type if _zm else None,
-            "debris_profile": sorted(_zm.debris_profile) if (_zm and _zm.debris_profile) else [],
+            "floor_type": _zm.floor_type,
+            "debris_profile": sorted(_zm.debris_profile) if _zm.debris_profile else [],
         },
         "people": {
             name: {
@@ -216,17 +227,10 @@ def _render_prompt(
             self.robot_states = ctx.robot_states
             self.upcoming_events = events
 
-    # Resolve ZoneMeta for this zone.
-    # zone_metadata is keyed by zone_id (int); ZoneMeta has no label field.
-    # Build a best-effort lookup: iterate values and return the first entry
-    # whose zone falls under the same unit, or just the first entry when only
-    # one zone is active (Phase 1). Falls back to a zero-id sentinel so the
-    # template always receives a valid ZoneMeta object.
-    zone_meta = ZoneMeta(zone_id=0, unit_id=0)  # fallback sentinel
-    if ctx.zone_metadata:
-        # Phase 1: exactly one zone ("Litter Box") — first entry is correct.
-        # Phase 2+: extend with a label field on ZoneMeta or a label→id index.
-        zone_meta = next(iter(ctx.zone_metadata.values()))
+    # Resolve ZoneMeta for this zone via the shared helper.
+    # Phase 1: single active zone — helper returns first entry (correct).
+    # Phase 2+: helper will match by label field once ZoneMeta.label is added.
+    zone_meta = _resolve_zone_meta(zone, ctx)
 
     zone_score = ctx.zone_scores.get(zone)
 
