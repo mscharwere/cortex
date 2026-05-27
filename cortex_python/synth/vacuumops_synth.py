@@ -277,6 +277,11 @@ async def build_snapshot(
     if not zone_scores:
         raise RuntimeError("HomeOps zone scores empty or unavailable — skipping tick")
 
+    # ── Zone metadata (HomeOps) — optional; degraded context if unavailable ──
+    # Failure does NOT skip the tick — scores are the hard dependency.
+    # get_zone_metadata() logs and returns {} on failure.
+    zone_metadata = await homeops_adapter.get_zone_metadata()
+
     # ── Home context ──────────────────────────────────────────────────────────
     home_state = await ha_adapter.get_entity_state("sensor.home_context")
     home: dict = {}
@@ -351,6 +356,7 @@ async def build_snapshot(
         people=people,
         rooms=rooms,
         zone_scores=zone_scores,
+        zone_metadata=zone_metadata,
         upcoming_events=upcoming_events,
         robot_states=robot_states,
         quiet_hours_1f=quiet_hours_1f,

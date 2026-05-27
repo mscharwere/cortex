@@ -18,7 +18,7 @@ import httpx
 import structlog
 
 from cortex_python.config.settings import Settings
-from cortex_python.modules.vacuumops.schemas import DecisionEntry
+from cortex_python.modules.vacuumops.schemas import DecisionEntry, ZoneMeta
 
 log = structlog.get_logger()
 
@@ -69,6 +69,51 @@ class HomeOpsAdapter:
                     if label is not None and score is not None:
                         scores[label] = float(score)
             return scores
+
+    async def get_zone_metadata(self) -> dict[int, ZoneMeta]:
+        """Fetch per-zone structural metadata from HomeOps.
+
+        GET /api/vacuum/zones
+        Returns a dict keyed by zone_id (int) → ZoneMeta.
+
+        Fields mapped from response: id, unit_id, floor_type, debris_profile,
+        contained_by, dispatchable (all added in HomeOps PRs #67+#68).
+        child_zones is computed here as the reverse of contained_by (single pass, O(n)).
+
+        Returns {} on failure — caller (synth) treats missing metadata as degraded
+        but does NOT skip the tick (zone scores are the hard dependency, not metadata).
+        """
+        try:
+            async with self._client() as client:
+                r = await client.get("/api/vacuum/zones")
+                r.raise_for_status()
+                data = r.json()
+        except Exception as exc:
+            log.warning("homeops_get_zone_metadata_failed", error=str(exc))
+            return {}
+
+        zones: dict[int, ZoneMeta] = {}
+        for z in data.get("data", []):
+            zone_id = z.get("id")
+            unit_id = z.get("unit_id")
+            if zone_id is None or unit_id is None:
+                continue
+            zones[zone_id] = ZoneMeta(
+                zone_id=int(zone_id),
+                unit_id=int(unit_id),
+                floor_type=z.get("floor_type"),
+                debris_profile=z.get("debris_profile") or [],
+                contained_by=z.get("contained_by"),
+                dispatchable=z.get("dispatchable", True),
+                child_zones=[],  # populated below
+            )
+
+        # Compute child_zones reverse index in one pass
+        for meta in zones.values():
+            if meta.contained_by is not None and meta.contained_by in zones:
+                zones[meta.contained_by].child_zones.append(meta.zone_id)
+
+        return zones
 
     async def trigger_vacuum(
         self,

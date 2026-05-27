@@ -40,7 +40,7 @@ from cortex_python.adapters.litellm_client import build_litellm_client
 from cortex_python.config.settings import Settings
 from cortex_python.modules.vacuumops.config import VacuumOpsConfig
 from cortex_python.modules.vacuumops.jobs import LitterBoxJob, VacuumJob
-from cortex_python.modules.vacuumops.l1 import run_l1
+from cortex_python.modules.vacuumops.l1 import L1Decision, resolve_params, run_l1
 from cortex_python.modules.vacuumops.r0 import _ZONE_COOLDOWN_KEY as _R0_ZONE_COOLDOWN_KEY
 from cortex_python.modules.vacuumops.r0 import run_r0
 from cortex_python.modules.vacuumops.r1 import _ROBOT_COOLDOWN_KEY as _R1_ROBOT_COOLDOWN_KEY
@@ -49,6 +49,7 @@ from cortex_python.modules.vacuumops.schemas import (
     BatchEntry,
     ContextSnapshot,
     DecisionEntry,
+    DropRecord,
     ZoneDecisionDetail,
     ZoneOutcome,
 )
@@ -175,6 +176,7 @@ async def evaluate_zone(
     litellm_client: Any,
     vacuumops_cfg: VacuumOpsConfig,
     patterns: list[dict],
+    l1_results: dict[tuple[str, str], L1Decision] | None = None,
 ) -> ZoneOutcome:
     """Evaluate one (job, zone) pair through R0 → R1 → L1.
 
@@ -300,6 +302,10 @@ async def evaluate_zone(
             l1_confidence=l1_decision.confidence,
         )
 
+    # Populate l1_results so assemble_batch can resolve cleaning params
+    if l1_results is not None:
+        l1_results[(job.job_id, zone)] = l1_decision
+
     return ZoneOutcome(
         zone=zone,
         action="dispatch",
@@ -309,6 +315,30 @@ async def evaluate_zone(
         score=score,
         l1_confidence=l1_decision.confidence,
     )
+
+
+# ── Containment dedup ─────────────────────────────────────────────────────────
+
+
+def dedup_contained(
+    candidates: list[ZoneOutcome], zone_meta: dict
+) -> tuple[list[ZoneOutcome], list[DropRecord]]:
+    """Drop child zones whose parent is also a candidate in the same tick (same job_id).
+
+    A child zone is identified by zone_meta[zone_id].contained_by being non-None
+    and pointing to a zone_id whose job is also in the candidate set.
+
+    If the parent zone is not dispatchable (e.g. virtual/aggregate), the child
+    is kept rather than dropped.
+
+    Returns (kept, dropped) where dropped entries are logged as containment_dedup.
+    """
+    # Phase 2 TODO: match candidates by zone_id once ZoneMeta gains a label field
+
+    if not zone_meta:
+        return list(candidates), []
+
+    return list(candidates), []
 
 
 # ── Batch assembly ─────────────────────────────────────────────────────────────
@@ -363,6 +393,7 @@ def assemble_batch(
     zone_outcomes: list[ZoneOutcome],
     ctx: ContextSnapshot,
     jobs: list[VacuumJob],
+    l1_results: dict | None = None,
 ) -> list[BatchEntry]:
     """Assemble a dispatch batch for one robot (D10 + D11).
 
@@ -372,23 +403,37 @@ def assemble_batch(
     because bundle candidates that failed R0 (including cooldown) already have
     action="defer" with gate_failed="r0".
 
+    l1_results: dict keyed by (job_id, zone_label) → L1Decision.
+    Used to resolve passes/intensity via resolve_params(). If None or key absent,
+    falls back to job.cleaning_params defaults (source="default").
+
     Spec: §8.3 assemble_batch pseudocode
     """
+    if l1_results is None:
+        l1_results = {}
+
     primary = [zo for zo in zone_outcomes if zo.action == "dispatch"]
     if not primary:
         return []
 
-    batch: list[BatchEntry] = [
-        BatchEntry(
-            zone=zo.zone,
-            bundled=False,
-            score=zo.score,
-            l1_confidence=zo.l1_confidence,
-            passes=_job_for_zone(zo.zone).cleaning_params.get("passes", "auto"),
-            intensity=_job_for_zone(zo.zone).cleaning_params.get("intensity", "auto"),
+    batch: list[BatchEntry] = []
+    for zo in primary:
+        job = _job_for_zone(zo.zone)
+        l1 = l1_results.get((job.job_id, zo.zone))
+        passes, intensity, src = resolve_params(job, l1)
+        params_reason = l1.params_reason if (l1 and src != "default") else None
+        batch.append(
+            BatchEntry(
+                zone=zo.zone,
+                bundled=False,
+                score=zo.score,
+                l1_confidence=zo.l1_confidence,
+                passes=passes,
+                intensity=intensity,
+                params_source=src,
+                params_reason=params_reason,
+            )
         )
-        for zo in primary
-    ]
 
     # D11 bundle sweep — pull in below-threshold zones that pass gates
     primary_zones = {e.zone for e in batch}
@@ -421,6 +466,7 @@ def assemble_batch(
             and _zone_effective_simple(job, zo.zone, ctx)
             and _noise_acceptable_simple(job, zo.zone, ctx)
         ):
+            # Bundled zones skip L1 (D11) — use job defaults
             batch.append(
                 BatchEntry(
                     zone=zo.zone,
@@ -429,6 +475,8 @@ def assemble_batch(
                     l1_confidence=None,
                     passes=job.cleaning_params.get("passes", "auto"),
                     intensity=job.cleaning_params.get("intensity", "auto"),
+                    params_source="default",
+                    params_reason=None,
                 )
             )
 
@@ -813,6 +861,7 @@ async def vacuumops_loop(settings: Settings) -> None:
 
             # Group jobs by robot
             per_robot: dict[str, list[ZoneOutcome]] = defaultdict(list)
+            per_robot_l1: dict[str, dict[tuple[str, str], L1Decision]] = defaultdict(dict)
             any_robot_cooldown = False
             tick_has_l1_timeout = False
 
@@ -834,6 +883,9 @@ async def vacuumops_loop(settings: Settings) -> None:
                     continue
 
                 # Per-zone evaluations — parallel L1 calls where applicable (D13)
+                # l1_results collects L1Decision objects keyed by (job_id, zone_label)
+                # so that assemble_batch can resolve cleaning params from L1 output.
+                l1_results: dict[tuple[str, str], L1Decision] = {}
                 zone_coros = [
                     evaluate_zone(
                         job=job,
@@ -844,6 +896,7 @@ async def vacuumops_loop(settings: Settings) -> None:
                         litellm_client=litellm_client,
                         vacuumops_cfg=vacuumops_cfg,
                         patterns=patterns,
+                        l1_results=l1_results,
                     )
                     for zone in job.zones
                 ]
@@ -851,12 +904,29 @@ async def vacuumops_loop(settings: Settings) -> None:
                     await asyncio.gather(*zone_coros, return_exceptions=False)
                 )
 
+                # Containment dedup — drop child zones whose parent is also a candidate.
+                # Dropped zones are logged to decision_log with event "containment_dedup".
+                # Phase 1: single zone, no containment relationships — this is a no-op
+                # but infrastructure is wired for Phase 2.
+                deduped_results, dropped_records = dedup_contained(
+                    zone_results, ctx.zone_metadata
+                )
+                for drop in dropped_records:
+                    log.info(
+                        "containment_dedup",
+                        zone_id=drop.zone_id,
+                        job_id=drop.job_id,
+                        reason=drop.reason,
+                        parent_zone_id=drop.parent_zone_id,
+                    )
+
                 # Track L1 timeouts
-                for zo in zone_results:
+                for zo in deduped_results:
                     if zo.reason in ("l1_timeout", "l1_exception:l1_timeout"):
                         tick_has_l1_timeout = True
 
-                per_robot[job.robot].extend(zone_results)
+                per_robot[job.robot].extend(deduped_results)
+                per_robot_l1[job.robot].update(l1_results)
 
             # Update L1 timeout counter (§8.2 backoff)
             if tick_has_l1_timeout:
@@ -866,7 +936,10 @@ async def vacuumops_loop(settings: Settings) -> None:
 
             # Per-robot batch assembly + dispatch
             for robot, zone_outcomes in per_robot.items():
-                batch = assemble_batch(robot, zone_outcomes, ctx, ACTIVE_JOBS)
+                batch = assemble_batch(
+                    robot, zone_outcomes, ctx, ACTIVE_JOBS,
+                    l1_results=per_robot_l1.get(robot, {}),
+                )
 
                 await persist_decision(
                     tick_id=tick_id,

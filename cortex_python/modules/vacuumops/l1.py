@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from cortex_python.config.settings import Settings
 from cortex_python.modules.vacuumops.jobs import VacuumJob
 from cortex_python.modules.vacuumops.noise import noise_budget, noise_impact
-from cortex_python.modules.vacuumops.schemas import ContextSnapshot
+from cortex_python.modules.vacuumops.schemas import ContextSnapshot, ZoneMeta
 
 log = structlog.get_logger()
 
@@ -57,6 +57,41 @@ class L1Decision(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str
     defer_until_hint: str | None = None
+    # Cleaning parameters (dispatch params spec)
+    passes: Literal["auto", "single", "double"] | None = None
+    intensity: Literal["auto", "normal", "high"] | None = None
+    params_reason: str | None = None  # ≤120 chars
+
+
+def _resolve_zone_meta(zone_label: str, ctx: "ContextSnapshot") -> "ZoneMeta":
+    """Resolve ZoneMeta for a zone. Phase 1: single-zone, returns first entry.
+    Phase 2: match by label field once ZoneMeta.label is added."""
+    if not ctx.zone_metadata:
+        return ZoneMeta(zone_id=0, unit_id=0)
+    # Phase 1: single active zone — first (only) entry is correct
+    # Phase 2 TODO: match by zone_label when ZoneMeta gains a label field
+    return next(iter(ctx.zone_metadata.values()))
+
+
+def resolve_params(job: VacuumJob, l1: "L1Decision | None") -> tuple[str, str, str]:
+    """Resolve passes + intensity from L1 result, falling back to job defaults.
+
+    Returns (passes, intensity, source) where source is "l1" | "mixed" | "default".
+    """
+    default_passes = job.cleaning_params.get("passes", "auto")
+    default_intensity = job.cleaning_params.get("intensity", "auto")
+    if l1 is None:
+        return default_passes, default_intensity, "default"
+    p = l1.passes or default_passes
+    i = l1.intensity or default_intensity
+    src = (
+        "l1"
+        if (l1.passes and l1.intensity)
+        else "mixed"
+        if (l1.passes or l1.intensity)
+        else "default"
+    )
+    return p, i, src
 
 
 def _build_context_hash(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> str:
@@ -66,9 +101,19 @@ def _build_context_hash(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> str:
     room activities to one-decimal confidence, score rounded to int,
     upcoming-events titles+start-minute). Spec §7.3.
     """
+    # Resolve zone metadata for cache-key purposes using the shared helper.
+    # floor_type and debris_profile are included so that a metadata change
+    # (e.g. floor type corrected in DB) busts the Redis cache rather than
+    # returning a stale L1Decision computed under the old profile.
+    _zm = _resolve_zone_meta(zone, ctx)
+
     subset: dict[str, Any] = {
         "zone": zone,
         "score": round(ctx.zone_scores.get(zone, 0.0)),
+        "zone_meta": {
+            "floor_type": _zm.floor_type,
+            "debris_profile": sorted(_zm.debris_profile) if _zm.debris_profile else [],
+        },
         "people": {
             name: {
                 "activity": p.activity,
@@ -180,6 +225,13 @@ def _render_prompt(
             self.robot_states = ctx.robot_states
             self.upcoming_events = events
 
+    # Resolve ZoneMeta for this zone via the shared helper.
+    # Phase 1: single active zone — helper returns first entry (correct).
+    # Phase 2+: helper will match by label field once ZoneMeta.label is added.
+    zone_meta = _resolve_zone_meta(zone, ctx)
+
+    zone_score = ctx.zone_scores.get(zone)
+
     # Render
     tmpl = env.from_string(prompt_template)
     rendered = tmpl.render(
@@ -193,6 +245,8 @@ def _render_prompt(
         noise_impact=round(impact, 2),
         noise_budget=round(budget, 2),
         patterns_block=patterns_block,
+        zone_meta=zone_meta,
+        zone_score=zone_score,
     )
     return rendered
 
@@ -254,7 +308,7 @@ async def run_l1(
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.1,  # Low temperature — we want deterministic judgment
-        "max_tokens": 256,
+        "max_tokens": 512,  # Bumped from 256 — cleaning params section adds ~100 tokens
     }
 
     # Call LiteLLM

@@ -60,5 +60,51 @@ NEVER override R0 results (those are hard gates already evaluated upstream).
   "decision": "dispatch" | "defer",
   "confidence": 0.0–1.0,
   "reason": "one-sentence justification grounded in the context above",
-  "defer_until_hint": "optional PST timestamp or relative descriptor; null if dispatch"
+  "defer_until_hint": "optional PST timestamp or relative descriptor; null if dispatch",
+  "passes": "auto" | "single" | "double" | null,
+  "intensity": "auto" | "normal" | "high" | null,
+  "params_reason": "≤120 chars explaining the cleaning parameter choice" | null
 }
+
+If your decision is `defer`, omit `passes`, `intensity`, and `params_reason` or set them to `null`. These fields are only meaningful on a dispatch decision.
+
+---
+
+## Cleaning Parameters
+
+After deciding dispatch vs. defer, if dispatching, also choose two parameters:
+
+**Zone context**
+- Floor type: {{ zone_meta.floor_type or "unspecified" }}
+- Debris profile: {{ zone_meta.debris_profile | join(", ") if zone_meta.debris_profile else "unspecified" }}
+- Containment children: {{ zone_meta.child_zones | length }} (their dirtiness has been folded into this zone's score)
+
+**Signals**
+- Petivity dirtiness contribution (last 24h): folded into zone_score below
+- Time since last clean: {{ time_since_last_clean }}
+- Current dirtiness score: {{ zone_score }}
+
+**Principles, not rules**
+
+`passes` controls how many times the robot covers the floor.
+- `auto` lets the robot's Dirt Detect sensor decide per-spot. Safe default when the dirt is unevenly distributed or unpredictable.
+- `single` is a deliberate one-pass for light, even soil. Fast, low noise, low battery.
+- `double` is a deliberate two-pass for heavy, ground-in, or sticky soil where a second pass meaningfully helps.
+
+`intensity` controls suction power.
+- `auto` lets the floor sensor scale suction to surface type. Right answer when the zone is mixed surface or you're unsure.
+- `normal` is quieter and saves battery on hard floors with light dust.
+- `high` is for embedded debris on carpet or persistent fine particulate on hard floor — but it is noticeably louder and drains battery faster.
+
+Reason about the physics: heavier suction helps when debris is dense or embedded; a second pass helps when one pass clearly won't lift everything; `auto` is the right answer when you don't have strong evidence either way. Litter granules on hard floor behave differently than pet hair on carpet; cat litter near the box is a localized dense deposit, not a whole-zone problem.
+
+**Output**
+
+If dispatching, include in your JSON:
+- `passes`: one of `auto | single | double`
+- `intensity`: one of `auto | normal | high`
+- `params_reason`: ≤120 chars explaining the choice in plain language
+
+If deferring, set `passes`, `intensity`, and `params_reason` to `null`.
+
+If you genuinely have no signal to prefer anything over `auto`, choose `auto` for both and say so. Do not invent specificity.

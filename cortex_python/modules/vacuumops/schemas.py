@@ -7,11 +7,25 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §3 + §7.4
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
 # ── Public context types (§3) ────────────────────────────────────────────────
+
+
+@dataclass
+class ZoneMeta:
+    """Per-zone structural metadata fetched from HomeOps each tick."""
+
+    zone_id: int
+    unit_id: int
+    floor_type: str | None = None
+    debris_profile: list[str] = field(default_factory=list)
+    contained_by: int | None = None
+    dispatchable: bool = True
+    child_zones: list[int] = field(default_factory=list)
+    # child_zones: reverse index of contained_by — computed by homeops_adapter each tick
 
 
 @dataclass
@@ -115,6 +129,10 @@ class ContextSnapshot:
     robot_states: dict[str, RobotState]
     # keys: "ethan" | "sam"
 
+    # Zone metadata — structural per-zone data fetched from HomeOps each tick
+    zone_metadata: dict[int, ZoneMeta] = field(default_factory=dict)
+    # keys: zone_id (int). Built by homeops_adapter each tick.
+
     # Derived (computed once when snapshot is built)
     noise_budget: float | None = None
     # 0–10 scale; computed by noise model (§6); None until noise step runs
@@ -189,6 +207,16 @@ class ZoneOutcome:
 
 
 @dataclass
+class DropRecord:
+    """A zone dropped by containment dedup. Logged to decision_log."""
+
+    zone_id: int
+    job_id: str
+    reason: str = "contained_by"
+    parent_zone_id: int | None = None
+
+
+@dataclass
 class BatchEntry:
     """One zone in a per-robot dispatch batch. Assembled by assemble_batch().
 
@@ -202,3 +230,7 @@ class BatchEntry:
     # None for bundled zones and R1-decided zones; populated for L1-decided zones
     passes: str = "auto"
     intensity: str = "auto"
+    params_source: str = "default"
+    # "l1" | "mixed" | "default" — how passes/intensity were resolved
+    params_reason: str | None = None
+    # 1-sentence rationale from L1; None when source == "default"
