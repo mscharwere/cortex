@@ -333,29 +333,11 @@ def dedup_contained(
 
     Returns (kept, dropped) where dropped entries are logged as containment_dedup.
     """
-    # Build a lookup: (job_id, zone_label) → zone_id for candidates that have metadata
-    # We need to bridge zone label → zone_id since ZoneOutcome carries the label string.
-    # Build a label→zone_id map from zone_meta values.
-    # NOTE: ZoneMeta has no label field — this mapping cannot be built from metadata alone.
-    # Containment dedup operates on zone_id integers; candidates carry string labels.
-    # Until a label field is added to ZoneMeta (Phase 2 extension), we skip dedup
-    # when metadata is absent, and apply dedup only when zone_metadata is populated
-    # AND the candidate labels can be resolved to zone_ids via the metadata.
-    # For Phase 1 (single zone "Litter Box"), there are no child/parent pairs,
-    # so this function is effectively a no-op but the infrastructure is in place.
+    # Phase 2 TODO: match candidates by zone_id once ZoneMeta gains a label field
 
     if not zone_meta:
         return list(candidates), []
 
-    # Build zone_id → label reverse map for candidates:
-    # Since ZoneMeta has no label, we cannot resolve label→zone_id here.
-    # The dedup logic that follows uses zone_id integers from zone_meta directly;
-    # in Phase 1 this never produces drops (no containment relationships exist yet).
-    # Phase 2: add `label: str` to ZoneMeta, then resolve here.
-
-    # Build candidate_keys as (job_id, zone_id) — requires label→id resolution.
-    # Without a label field on ZoneMeta, we treat all candidates as un-resolvable
-    # and return them intact. Drop logic is wired correctly for when Phase 2 adds labels.
     return list(candidates), []
 
 

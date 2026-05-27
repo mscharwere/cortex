@@ -66,8 +66,6 @@ class L1Decision(BaseModel):
 def _resolve_zone_meta(zone_label: str, ctx: "ContextSnapshot") -> "ZoneMeta":
     """Resolve ZoneMeta for a zone. Phase 1: single-zone, returns first entry.
     Phase 2: match by label field once ZoneMeta.label is added."""
-    from .schemas import ZoneMeta
-
     if not ctx.zone_metadata:
         return ZoneMeta(zone_id=0, unit_id=0)
     # Phase 1: single active zone — first (only) entry is correct

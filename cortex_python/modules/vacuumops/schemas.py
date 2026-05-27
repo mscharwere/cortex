@@ -233,4 +233,4 @@ class BatchEntry:
     params_source: str = "default"
     # "l1" | "mixed" | "default" — how passes/intensity were resolved
     params_reason: str | None = None
-    # 1-sentence rationale from L1; None when source != "l1"
+    # 1-sentence rationale from L1; None when source == "default"
