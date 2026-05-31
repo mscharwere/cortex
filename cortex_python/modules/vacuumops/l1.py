@@ -94,12 +94,22 @@ def resolve_params(job: VacuumJob, l1: "L1Decision | None") -> tuple[str, str, s
     return p, i, src
 
 
-def _build_context_hash(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> str:
+def _build_context_hash(
+    job: VacuumJob,
+    zone: str,
+    ctx: ContextSnapshot,
+    bypassed_for_zone: bool = False,
+    reason_for_zone: str | None = None,
+) -> str:
     """Build a deterministic cache key from the context subset the prompt uses.
 
     Only includes fields the prompt actually references (people activities,
     room activities to one-decimal confidence, score rounded to int,
     upcoming-events titles+start-minute). Spec §7.3.
+
+    Home-occupancy fields (spec §6.7 cache-key note) are included so that a
+    presence change — or a bypass state change — busts the Redis cache rather
+    than returning a stale L1Decision computed under different presence context.
     """
     # Resolve zone metadata for cache-key purposes using the shared helper.
     # floor_type and debris_profile are included so that a metadata change
@@ -145,6 +155,14 @@ def _build_context_hash(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> str:
             "battery": ctx.robot_states.get(job.robot, None)
             and ctx.robot_states[job.robot].battery_pct,
         },
+        # Home-occupancy context (spec §6.7 cache-key note): presence changes and bypass
+        # state changes must bust the cache or stale L1 decisions silently persist.
+        "home": {
+            "count": ctx.home_count,
+            "empty": ctx.home_empty,
+            "bypass": bypassed_for_zone,
+            "reason": reason_for_zone,
+        },
     }
     canonical = json.dumps(subset, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()[:32]
@@ -157,6 +175,8 @@ def _render_prompt(
     marginal_result: tuple[str, str, str],
     prompt_template: str,
     patterns_block: str,
+    bypassed_for_zone: bool = False,
+    reason_for_zone: str | None = None,
 ) -> str:
     """Render the Jinja2 prompt template for L1.
 
@@ -247,6 +267,12 @@ def _render_prompt(
         patterns_block=patterns_block,
         zone_meta=zone_meta,
         zone_score=zone_score,
+        # Home-occupancy context (spec §6.7)
+        home_count=ctx.home_count,
+        who_home=", ".join(ctx.who_home) if ctx.who_home else "nobody",
+        home_empty=ctx.home_empty,
+        occupancy_gate_bypassed=bypassed_for_zone,
+        bypass_reason=reason_for_zone or "none",
     )
     return rendered
 
@@ -261,6 +287,8 @@ async def run_l1(
     redis_client: aioredis.Redis,
     prompt_template: str,
     patterns_block: str,
+    bypassed_for_zone: bool = False,
+    reason_for_zone: str | None = None,
 ) -> L1Decision:
     """Run the L1 LLM disambiguation call for one (job, zone) pair.
 
@@ -278,7 +306,11 @@ async def run_l1(
     Spec: §7.3
     """
     # Check Redis cache first
-    context_hash = _build_context_hash(job, zone, ctx)
+    context_hash = _build_context_hash(
+        job, zone, ctx,
+        bypassed_for_zone=bypassed_for_zone,
+        reason_for_zone=reason_for_zone,
+    )
     cache_key = _L1_CACHE_KEY.format(context_hash=context_hash)
 
     try:
@@ -292,7 +324,11 @@ async def run_l1(
 
     # Render prompt
     try:
-        prompt = _render_prompt(job, zone, ctx, marginal_result, prompt_template, patterns_block)
+        prompt = _render_prompt(
+            job, zone, ctx, marginal_result, prompt_template, patterns_block,
+            bypassed_for_zone=bypassed_for_zone,
+            reason_for_zone=reason_for_zone,
+        )
     except Exception as exc:
         log.error("l1_prompt_render_failed", job_id=job.job_id, zone=zone, error=str(exc))
         return L1Decision(

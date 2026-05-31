@@ -44,7 +44,7 @@ from cortex_python.modules.vacuumops.l1 import L1Decision, resolve_params, run_l
 from cortex_python.modules.vacuumops.r0 import _ZONE_COOLDOWN_KEY as _R0_ZONE_COOLDOWN_KEY
 from cortex_python.modules.vacuumops.r0 import run_r0
 from cortex_python.modules.vacuumops.r1 import _ROBOT_COOLDOWN_KEY as _R1_ROBOT_COOLDOWN_KEY
-from cortex_python.modules.vacuumops.r1 import run_r1
+from cortex_python.modules.vacuumops.r1 import occupancy_gate_bypass, run_r1
 from cortex_python.modules.vacuumops.schemas import (
     BatchEntry,
     ContextSnapshot,
@@ -211,9 +211,32 @@ async def evaluate_zone(
             score=score,
         )
 
+    # ── Occupancy-gate override — compute once per (zone, tick) ─────────────
+    # Resolve zone metadata for this zone (Phase 1: single zone, first entry is correct).
+    # Phase 2: ZoneMeta needs a label field to match by name (TODO already in l1.py).
+    from cortex_python.modules.vacuumops.l1 import _resolve_zone_meta
+    zone_meta_for_bypass = _resolve_zone_meta(zone, ctx)
+    bypass_mode, bypass_reason_str = occupancy_gate_bypass(zone, ctx, zone_meta_for_bypass)
+    bypassed_for_zone = bypass_mode != "none"
+
+    if bypassed_for_zone:
+        log.info(
+            "occupancy_gate_bypassed",
+            job_id=job.job_id,
+            zone=zone,
+            mode=bypass_mode,
+            reason=bypass_reason_str,
+            tick_id=ctx.tick_id,
+        )
+
     # R1 — two-gate rules
     try:
-        r1_result, r1_gate_failed, r1_reason = await run_r1(job, zone, ctx, redis_client, patterns)
+        r1_result, r1_gate_failed, r1_reason = await run_r1(
+            job, zone, ctx, redis_client, patterns,
+            zone_meta=zone_meta_for_bypass,
+            bypass_mode=bypass_mode,
+            bypass_reason_str=bypass_reason_str,
+        )
     except Exception as exc:
         log.exception("r1_error", job_id=job.job_id, zone=zone)
         return ZoneOutcome(
@@ -242,7 +265,7 @@ async def evaluate_zone(
             action="dispatch",
             tier="R1",
             gate_failed="none",
-            reason="all_rules_pass",
+            reason=r1_reason,  # may include occ_bypass tag for observability
             score=score,
         )
 
@@ -260,6 +283,8 @@ async def evaluate_zone(
             redis_client=redis_client,
             prompt_template=prompt_template,
             patterns_block=patterns_block,
+            bypassed_for_zone=bypassed_for_zone,
+            reason_for_zone=bypass_reason_str,
         )
     except Exception as exc:
         log.exception("l1_error", job_id=job.job_id, zone=zone)
@@ -722,6 +747,14 @@ async def persist_decision(
                         {"label": z.label, "score": z.score, "bundled": z.bundled}
                         for z in zone_details
                     ],
+                    # Occupancy-gate bypass observability (spec §6.8):
+                    # reason string already contains the bypass tag (e.g.
+                    # "all_rules_pass|occ_bypass:home_empty") — surfaced here
+                    # in structured form for easier querying during dry-run analysis.
+                    "occupancy_gate_bypassed": any(
+                        "|occ_bypass:" in zo.reason or "|occ_relax:" in zo.reason
+                        for zo in zone_outcomes
+                    ),
                 },
                 "outcome": "executed" if decision_str == "dispatch" else "suppressed",
                 "latency_ms": None,

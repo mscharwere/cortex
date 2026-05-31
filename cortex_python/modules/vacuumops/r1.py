@@ -26,7 +26,7 @@ import redis.asyncio as aioredis
 
 from cortex_python.modules.vacuumops.jobs import VacuumJob
 from cortex_python.modules.vacuumops.noise import FLOOR_ROOM_MAP, noise_budget, noise_impact
-from cortex_python.modules.vacuumops.schemas import ContextSnapshot
+from cortex_python.modules.vacuumops.schemas import ContextSnapshot, ZoneMeta
 
 # Redis key for per-robot cooldown (D12).
 # cortex:vacuumops:robot_cooldown:<robot>
@@ -41,6 +41,18 @@ _ACTIVE_ROOM_STATES = {"active", "cooking", "eating", "transit"}
 
 # Noise-sensitive room activities for noise_radius_check
 _NOISE_SENSITIVE_ACTIVITIES = {"sleeping"}
+
+# Elena friendly-name key for Override 2 carve-out (compared case-insensitively).
+# person.elena friendly_name confirmed == "Elena" (spec §10 Q2); case-insensitive
+# comparison is belt-and-suspenders per spec §2.1.
+_ELENA = "elena"
+
+# Explicit sensor-entity → room-key overrides for sensors that don't follow
+# the {room}_sensor_group or {room}_occupancy_status naming convention.
+# Keep small — only add entries as needed.
+_SENSOR_ENTITY_TO_ROOM: dict[str, str] = {
+    "binary_sensor.first_level_bathroom_tri_sensor_motion_detection": "bathroom",
+}
 
 
 # ── D12: Per-robot cooldown gate ──────────────────────────────────────────────
@@ -240,6 +252,70 @@ def noise_radius_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple
     return "PASS", "none", "no_noise_radius_overlap"
 
 
+# ── Occupancy-gate override helpers (spec §6.4, §6.5) ────────────────────────
+
+
+def room_key_for_zone(zone_meta: ZoneMeta | None) -> str | None:
+    """Resolve a zone's parent-room ctx.rooms key from its occupancy_sensor entity ID.
+
+    The litter box's occupancy_sensor is 'binary_sensor.hallway_sensor_group' (Hallway).
+    Returns None if the zone has no occupancy_sensor or the entity can't be resolved.
+
+    Resolution strategy (spec §6.4):
+      1. Explicit _SENSOR_ENTITY_TO_ROOM map (handles non-standard naming).
+      2. Strip 'binary_sensor.' prefix and a known suffix to recover the room key.
+    """
+    if zone_meta is None or not zone_meta.occupancy_sensor:
+        return None
+    ent = zone_meta.occupancy_sensor
+    if ent in _SENSOR_ENTITY_TO_ROOM:
+        return _SENSOR_ENTITY_TO_ROOM[ent]
+    name = ent.removeprefix("binary_sensor.")
+    for suffix in ("_sensor_group", "_occupancy_status", "_sensor_motion_detection"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return None
+
+
+def occupancy_gate_bypass(
+    zone: str,
+    ctx: ContextSnapshot,
+    zone_meta: ZoneMeta | None,
+) -> tuple[str, str | None]:
+    """Deterministic occupancy-gate bypass / relaxation (spec §6.5).
+
+    Returns (mode, reason):
+      "none"        → run the normal floor-level occupancy gates.
+      "full"        → Override 1: skip occupancy gates entirely (house empty).
+      "room_scoped" → Override 2: skip the floor-wide check; check ONLY the
+                      zone's parent room occupancy sensor.
+    reason is a short tag for logging / L1, or None when mode == "none".
+
+    Fail-closed: home_count == -1 (degraded/unknown) → no bypass, gate stays active.
+    ALL non-occupancy gates (battery, cooldown, noise, transit, sleep radius) still
+    run regardless of mode (spec §0).
+    """
+    hc = ctx.home_count
+    if hc < 0:
+        # Unknown presence (degraded sensor.home_context) → no bypass
+        return "none", None
+
+    # Override 1 — Home Empty Bypass (all zones, full skip)
+    if hc == 0:
+        return "full", "home_empty"
+
+    # Override 2 — Single-Person Room-Scoped Low-Disruption (this zone only)
+    if hc == 1 and zone_meta is not None and zone_meta.low_disruption:
+        # Carve-out: never relax if the sole occupant is Elena (she roams room-to-room
+        # doing chores; even alone she could be in any room). Any other single occupant
+        # (Carlos, guest, Iestaf…) qualifies. Compare case-insensitively (spec §2.1).
+        who = [w.lower() for w in ctx.who_home]
+        if _ELENA not in who:
+            return "room_scoped", "single_person_low_disruption"
+
+    return "none", None
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
@@ -249,18 +325,28 @@ async def run_r1(
     ctx: ContextSnapshot,
     redis_client: aioredis.Redis,
     patterns: list[dict] | None = None,
+    zone_meta: ZoneMeta | None = None,
+    bypass_mode: str = "none",
+    bypass_reason_str: str | None = None,
 ) -> tuple[str, str, str]:
     """Run the full R1 tier for one (job, zone) pair.
 
-    Sequence per spec §7.2:
+    Sequence per spec §7.2 + occupancy-gate override layer (spec §6.5, §6.6):
       1. Per-robot cooldown gate (D12) — short-circuits all zones for this robot
-      2. Effectiveness rules (hard FAIL → no L1)
-      3. Comfort rules (AMBIGUOUS / PASS-marginal → L1 if job.l1_required or AMBIGUOUS)
+      2. Occupancy-gate override decision (deterministic, computed by caller via
+         occupancy_gate_bypass(); passed in as bypass_mode to avoid double-compute)
+      3. Effectiveness occupancy rules — bypassed/narrowed per override mode:
+           "none"        → run zone_active_use_check + floor_clearance_check normally
+           "full"        → skip both (house empty; no one to disturb)
+           "room_scoped" → skip floor_clearance_check; check ONLY the zone's parent room
+      4. Transit lookahead — ALWAYS runs (not an occupancy gate)
+      5. Comfort rules (AMBIGUOUS / PASS-marginal → L1 if job.l1_required or AMBIGUOUS)
+         — ALWAYS runs (not an occupancy gate)
 
     Returns (result, gate_failed, reason):
       result ∈ {"PASS", "FAIL", "AMBIGUOUS"}
       gate_failed: which gate caused the failure (or "none" on PASS)
-      reason: short string for decision log
+      reason: short string for decision log (includes bypass tag when a bypass fired)
     """
     if patterns is None:
         patterns = []
@@ -270,18 +356,50 @@ async def run_r1(
     if result == "FAIL":
         return result, gate_failed, reason
 
-    # Effectiveness rules — hard gates
-    for eff_fn in (zone_active_use_check, floor_clearance_check):
-        result, gate_failed, reason = eff_fn(job, zone, ctx)
-        if result == "FAIL":
-            return result, gate_failed, reason
+    # ── Occupancy-gate override / relaxation (spec §6.6) ─────────────────────
+    if bypass_mode == "full":
+        # Override 1 — house empty: skip zone_active_use_check + floor_clearance_check.
+        # The inflated kitchen occupancy sensor (dry-run bug) is the canonical case this fixes.
+        pass  # fall through to transit + comfort
 
-    # Transit lookahead (needs patterns list)
+    elif bypass_mode == "room_scoped":
+        # Override 2 — single non-Elena occupant + low_disruption zone.
+        # Floor-wide floor_clearance_check is replaced by a room-level check on the
+        # zone's own parent room (via occupancy_sensor → room key resolver, spec §6.4).
+        # zone_active_use_check checks by zone NAME key; for sub-zones like Litter Box
+        # the correct room is the parent room (hallway), not the zone label — so we skip
+        # zone_active_use_check too and do a single room-level check ourselves.
+        target_room = room_key_for_zone(zone_meta)
+        room = ctx.rooms.get(target_room) if target_room else None
+        if room is not None:
+            if room.raw_occupancy:
+                return (
+                    "FAIL",
+                    "effectiveness",
+                    f"target_room_occupied:{target_room}|occ_relax:{bypass_reason_str}",
+                )
+            if room.detected in _ACTIVE_ROOM_STATES:
+                return (
+                    "FAIL",
+                    "effectiveness",
+                    f"target_room_active:{target_room}:activity={room.detected}|occ_relax:{bypass_reason_str}",
+                )
+        # Room sensor unavailable → treat as clear (graceful degradation §8.5 consistent with
+        # floor_clearance_check which skips unavailable rooms rather than blocking).
+
+    else:
+        # mode == "none" — normal floor-level occupancy gates
+        for eff_fn in (zone_active_use_check, floor_clearance_check):
+            result, gate_failed, reason = eff_fn(job, zone, ctx)
+            if result == "FAIL":
+                return result, gate_failed, reason
+
+    # Transit lookahead — ALWAYS runs regardless of occupancy bypass (not an occupancy gate)
     result, gate_failed, reason = transit_pattern_lookahead(job, zone, ctx, patterns)
     if result == "FAIL":
         return result, gate_failed, reason
 
-    # Comfort rules — collect results
+    # Comfort rules — ALWAYS run (noise/sleep radius not affected by occupancy bypass)
     nb_result, nb_gate, nb_reason = noise_budget_check(job, zone, ctx)
     nr_result, nr_gate, nr_reason = noise_radius_check(job, zone, ctx)
 
@@ -296,8 +414,11 @@ async def run_r1(
         ambiguous_reason = nb_reason if nb_result == "AMBIGUOUS" else nr_reason
         return "AMBIGUOUS", "comfort", ambiguous_reason
 
-    # All pass
-    return "PASS", "none", "all_rules_pass"
+    # All pass — append bypass tag to reason for observability (spec §6.8)
+    pass_reason = "all_rules_pass"
+    if bypass_mode != "none" and bypass_reason_str:
+        pass_reason = f"all_rules_pass|occ_bypass:{bypass_reason_str}"
+    return "PASS", "none", pass_reason
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

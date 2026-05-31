@@ -296,6 +296,19 @@ async def build_snapshot(
         except Exception:
             degraded = True
 
+    # ── Presence breakdown — parsed from sensor.home_context (spec §2) ────────
+    # who_home is friendly-name Title Case (["Carlos","Elena"]) per the HA template.
+    # home_count == -1 is the "unknown" sentinel (degraded/missing) — fail-closed in gate.
+    # home_empty is only True on an explicit 0; unknown → False (belt-and-suspenders).
+    if home:
+        home_count = _safe_int(home.get("home_count"), default=-1)
+        raw_who = home.get("who_home")
+        who_home = list(raw_who) if isinstance(raw_who, list) else []
+    else:
+        home_count = -1
+        who_home = []
+    home_empty = (home_count == 0)
+
     # ── People ────────────────────────────────────────────────────────────────
     people: dict[str, PersonActivity] = {}
     for name in _PEOPLE:
@@ -363,6 +376,11 @@ async def build_snapshot(
         quiet_hours_2f=quiet_hours_2f,
         degraded=degraded,
         calendar_degraded=calendar_degraded,
+        # Presence breakdown (spec §2) — derived above from sensor.home_context attributes.
+        home_count=home_count,
+        who_home=who_home,
+        home_empty=home_empty,
+        # occupancy_gate_bypassed / bypass_reason are per-zone; set in evaluate_zone, not here.
     )
 
     # Compute noise_budget once (§6.3 — so R0/R1/L1 don't recompute independently)

@@ -16,6 +16,17 @@ Timestamp (PST): {{ ctx.timestamp_pst }}
 Zone dirtiness score: {{ ctx.zone_scores["Litter Box"] }} / 100 (threshold for dispatch: 50)
 Time since last clean: {{ time_since_last_clean }}
 
+## Home Occupancy
+
+- People home right now: {{ home_count }} ({{ who_home }})
+- House empty: {{ home_empty }}
+- Occupancy gate relaxed this run: {{ occupancy_gate_bypassed }}{% if occupancy_gate_bypassed %} — reason: {{ bypass_reason }}{% endif %}
+
+**How to use this:**
+- If the house is empty (`home_empty = true`), dispatch freely on cleaning merit alone — there is no one to disturb. Prefer `normal` intensity unless the dirtiness signal is strong, so that if someone returns mid-run the noise is modest.
+- If the gate was relaxed for a single non-Elena occupant (`single_person_low_disruption`), keep the run quiet and efficient: this is a low-disruption zone whose own room is clear, and someone is home elsewhere. Favor `single` pass + `normal` intensity unless the signal clearly justifies more.
+- If the gate was NOT relaxed (`occupancy_gate_bypassed = false`), occupancy was already clear by the normal rules — choose params on cleaning merit alone.
+
 People:
 {% for name, p in ctx.people.items() %}
 - {{ name }}: {{ p.activity }} (confidence {{ p.confidence }}){% if p.piano %} — PIANO PLAYING{% endif %}{% if p.sleep_confidence %} — sleep confidence {{ p.sleep_confidence }}{% endif %}

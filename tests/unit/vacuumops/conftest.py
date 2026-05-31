@@ -58,6 +58,9 @@ def make_snapshot(
     quiet_hours_2f: bool = False,
     upcoming_events: list | None = None,
     timestamp: datetime | None = None,
+    home_count: int = -1,
+    who_home: list | None = None,
+    home_empty: bool = False,
 ) -> ContextSnapshot:
     if timestamp is None:
         timestamp = datetime(2026, 5, 24, 15, 0, 0, tzinfo=timezone.utc)  # 8 AM PST
@@ -98,6 +101,9 @@ def make_snapshot(
         quiet_hours_1f=quiet_hours_1f,
         quiet_hours_2f=quiet_hours_2f,
         noise_budget=None,
+        home_count=home_count,
+        who_home=who_home if who_home is not None else [],
+        home_empty=home_empty,
     )
     return ctx
 
