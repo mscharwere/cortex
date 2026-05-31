@@ -474,7 +474,7 @@ async def test_run_r1_room_scoped_hallway_clear_kitchen_occupied(litter_box_job,
         bypass_mode="room_scoped", bypass_reason_str="single_person_low_disruption",
     )
     assert result == "PASS"
-    assert "occ_bypass:single_person_low_disruption" in reason or "occ_relax:single_person_low_disruption" in reason
+    assert "occ_bypass:single_person_low_disruption" in reason
 
 
 @pytest.mark.asyncio
@@ -491,3 +491,25 @@ async def test_run_r1_room_scoped_hallway_occupied_blocks(litter_box_job, mock_r
     assert result == "FAIL"
     assert gate == "effectiveness"
     assert "hallway" in reason
+
+
+@pytest.mark.asyncio
+async def test_room_scoped_missing_room_graceful_degradation(litter_box_job, mock_redis):
+    """Override 2 (room_scoped): target_room resolves via room_key_for_zone but that
+    room key is NOT present in ctx.rooms → zone is not blocked (PASS), no crash.
+
+    This covers the 'unknown room → don't block' safety behavior: if the room
+    the sensor maps to has no entry in ctx.rooms, run_r1 must fall through to
+    PASS rather than raise a KeyError or hard-FAIL.
+    """
+    # hallway_sensor_group → room_key "hallway"; deliberately omit "hallway" from ctx.rooms
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=True)
+    ctx = make_snapshot(home_count=1, who_home=["Carlos"])
+    # ctx.rooms intentionally has no "hallway" entry — graceful degradation path
+    result, gate, reason = await run_r1(
+        litter_box_job, "Litter Box", ctx, mock_redis,
+        zone_meta=meta,
+        bypass_mode="room_scoped", bypass_reason_str="single_person_low_disruption",
+    )
+    assert result == "PASS"
+    assert "occ_bypass:single_person_low_disruption" in reason
