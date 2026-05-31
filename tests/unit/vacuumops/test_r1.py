@@ -15,11 +15,14 @@ from cortex_python.modules.vacuumops.r1 import (
     floor_clearance_check,
     noise_budget_check,
     noise_radius_check,
+    occupancy_gate_bypass,
     per_robot_cooldown_check,
+    room_key_for_zone,
     run_r1,
     transit_pattern_lookahead,
     zone_active_use_check,
 )
+from cortex_python.modules.vacuumops.schemas import ZoneMeta
 from tests.unit.vacuumops.conftest import make_room, make_snapshot
 
 
@@ -311,3 +314,202 @@ async def test_run_r1_ambiguous_when_effectiveness_pass_comfort_ambiguous(
     assert result == "AMBIGUOUS"
     assert gate == "comfort"
     assert "noise_marginal" in reason
+
+
+# ── room_key_for_zone ─────────────────────────────────────────────────────────
+
+
+def _make_zone_meta(occupancy_sensor: str | None = None, low_disruption: bool = False) -> ZoneMeta:
+    return ZoneMeta(
+        zone_id=1, unit_id=1,
+        occupancy_sensor=occupancy_sensor,
+        low_disruption=low_disruption,
+    )
+
+
+def test_room_key_for_zone_sensor_group():
+    """binary_sensor.hallway_sensor_group → 'hallway'."""
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group")
+    assert room_key_for_zone(meta) == "hallway"
+
+
+def test_room_key_for_zone_kitchen_sensor_group():
+    """binary_sensor.kitchen_sensor_group → 'kitchen'."""
+    meta = _make_zone_meta("binary_sensor.kitchen_sensor_group")
+    assert room_key_for_zone(meta) == "kitchen"
+
+
+def test_room_key_for_zone_explicit_map():
+    """Bathroom tri-sensor handled by explicit _SENSOR_ENTITY_TO_ROOM map."""
+    meta = _make_zone_meta("binary_sensor.first_level_bathroom_tri_sensor_motion_detection")
+    assert room_key_for_zone(meta) == "bathroom"
+
+
+def test_room_key_for_zone_none():
+    """None occupancy_sensor → None."""
+    meta = _make_zone_meta(None)
+    assert room_key_for_zone(meta) is None
+
+
+def test_room_key_for_zone_no_meta():
+    """None zone_meta → None."""
+    assert room_key_for_zone(None) is None
+
+
+def test_room_key_for_zone_occupancy_status_suffix():
+    """binary_sensor.living_room_occupancy_status → 'living_room'."""
+    meta = _make_zone_meta("binary_sensor.living_room_occupancy_status")
+    assert room_key_for_zone(meta) == "living_room"
+
+
+# ── occupancy_gate_bypass ─────────────────────────────────────────────────────
+
+
+def test_bypass_degraded_home_count_fail_closed():
+    """home_count == -1 (degraded) → no bypass (fail closed)."""
+    ctx = make_snapshot(home_count=-1)
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=True)
+    mode, reason = occupancy_gate_bypass("Litter Box", ctx, meta)
+    assert mode == "none"
+    assert reason is None
+
+
+def test_bypass_override1_home_empty():
+    """home_count == 0 → full bypass (Override 1)."""
+    ctx = make_snapshot(home_count=0, home_empty=True, who_home=[])
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group")
+    mode, reason = occupancy_gate_bypass("Litter Box", ctx, meta)
+    assert mode == "full"
+    assert reason == "home_empty"
+
+
+def test_bypass_override1_home_empty_low_disruption_false():
+    """Override 1 fires regardless of low_disruption flag."""
+    ctx = make_snapshot(home_count=0, home_empty=True, who_home=[])
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=False)
+    mode, reason = occupancy_gate_bypass("Litter Box", ctx, meta)
+    assert mode == "full"
+    assert reason == "home_empty"
+
+
+def test_bypass_override2_single_carlos_low_disruption():
+    """home_count == 1, Carlos home, low_disruption=True → room_scoped bypass."""
+    ctx = make_snapshot(home_count=1, who_home=["Carlos"])
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=True)
+    mode, reason = occupancy_gate_bypass("Litter Box", ctx, meta)
+    assert mode == "room_scoped"
+    assert reason == "single_person_low_disruption"
+
+
+def test_bypass_override2_single_guest_low_disruption():
+    """Any single non-Elena occupant qualifies — guests included."""
+    ctx = make_snapshot(home_count=1, who_home=["Iestaf"])
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=True)
+    mode, reason = occupancy_gate_bypass("Litter Box", ctx, meta)
+    assert mode == "room_scoped"
+    assert reason == "single_person_low_disruption"
+
+
+def test_bypass_override2_elena_carveout():
+    """Elena is excluded from Override 2 — sole Elena occupant → no bypass."""
+    ctx = make_snapshot(home_count=1, who_home=["Elena"])
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=True)
+    mode, reason = occupancy_gate_bypass("Litter Box", ctx, meta)
+    assert mode == "none"
+    assert reason is None
+
+
+def test_bypass_override2_elena_case_insensitive():
+    """Elena carve-out is case-insensitive (belt-and-suspenders per spec §2.1)."""
+    ctx = make_snapshot(home_count=1, who_home=["ELENA"])
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=True)
+    mode, reason = occupancy_gate_bypass("Litter Box", ctx, meta)
+    assert mode == "none"
+
+
+def test_bypass_override2_not_low_disruption():
+    """Single non-Elena occupant but low_disruption=False → no Override 2."""
+    ctx = make_snapshot(home_count=1, who_home=["Carlos"])
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=False)
+    mode, reason = occupancy_gate_bypass("Litter Box", ctx, meta)
+    assert mode == "none"
+
+
+def test_bypass_two_people_home_no_bypass():
+    """home_count == 2 → no bypass (Override 2 requires exactly 1)."""
+    ctx = make_snapshot(home_count=2, who_home=["Carlos", "Carlitos"])
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=True)
+    mode, reason = occupancy_gate_bypass("Litter Box", ctx, meta)
+    assert mode == "none"
+
+
+# ── run_r1 with bypass modes ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_r1_full_bypass_ignores_kitchen_occupancy(litter_box_job, mock_redis):
+    """Override 1 (home_empty): occupied kitchen does NOT block dispatch."""
+    ctx = make_snapshot(home_count=0, home_empty=True)
+    ctx.rooms["kitchen"] = make_room("cooking", raw_occupancy=True)
+    # Without bypass: kitchen occupancy would fail floor_clearance_check.
+    # With bypass_mode="full": occupancy checks are skipped entirely.
+    result, gate, reason = await run_r1(
+        litter_box_job, "Litter Box", ctx, mock_redis,
+        bypass_mode="full", bypass_reason_str="home_empty",
+    )
+    assert result == "PASS"
+    assert "occ_bypass:home_empty" in reason
+
+
+@pytest.mark.asyncio
+async def test_run_r1_room_scoped_hallway_clear_kitchen_occupied(litter_box_job, mock_redis):
+    """Override 2 (room_scoped): hallway clear, kitchen occupied → dispatch allowed."""
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=True)
+    ctx = make_snapshot(home_count=1, who_home=["Carlos"])
+    ctx.rooms["kitchen"] = make_room("cooking", raw_occupancy=True)
+    ctx.rooms["hallway"] = make_room("idle", raw_occupancy=False)
+    result, gate, reason = await run_r1(
+        litter_box_job, "Litter Box", ctx, mock_redis,
+        zone_meta=meta,
+        bypass_mode="room_scoped", bypass_reason_str="single_person_low_disruption",
+    )
+    assert result == "PASS"
+    assert "occ_bypass:single_person_low_disruption" in reason
+
+
+@pytest.mark.asyncio
+async def test_run_r1_room_scoped_hallway_occupied_blocks(litter_box_job, mock_redis):
+    """Override 2 (room_scoped): hallway (zone's own room) occupied → still blocks."""
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=True)
+    ctx = make_snapshot(home_count=1, who_home=["Carlos"])
+    ctx.rooms["hallway"] = make_room("active", raw_occupancy=True)
+    result, gate, reason = await run_r1(
+        litter_box_job, "Litter Box", ctx, mock_redis,
+        zone_meta=meta,
+        bypass_mode="room_scoped", bypass_reason_str="single_person_low_disruption",
+    )
+    assert result == "FAIL"
+    assert gate == "effectiveness"
+    assert "hallway" in reason
+
+
+@pytest.mark.asyncio
+async def test_room_scoped_missing_room_graceful_degradation(litter_box_job, mock_redis):
+    """Override 2 (room_scoped): target_room resolves via room_key_for_zone but that
+    room key is NOT present in ctx.rooms → zone is not blocked (PASS), no crash.
+
+    This covers the 'unknown room → don't block' safety behavior: if the room
+    the sensor maps to has no entry in ctx.rooms, run_r1 must fall through to
+    PASS rather than raise a KeyError or hard-FAIL.
+    """
+    # hallway_sensor_group → room_key "hallway"; deliberately omit "hallway" from ctx.rooms
+    meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=True)
+    ctx = make_snapshot(home_count=1, who_home=["Carlos"])
+    # ctx.rooms intentionally has no "hallway" entry — graceful degradation path
+    result, gate, reason = await run_r1(
+        litter_box_job, "Litter Box", ctx, mock_redis,
+        zone_meta=meta,
+        bypass_mode="room_scoped", bypass_reason_str="single_person_low_disruption",
+    )
+    assert result == "PASS"
+    assert "occ_bypass:single_person_low_disruption" in reason

@@ -24,6 +24,13 @@ class ZoneMeta:
     debris_profile: list[str] = field(default_factory=list)
     contained_by: int | None = None
     dispatchable: bool = True
+    low_disruption: bool = False
+    # NEW (spec §3): CORTEX Override 2 eligibility — zone is non-disruptive to a single
+    # sole (non-Elena) occupant when the zone's own room is unoccupied.
+    occupancy_sensor: str | None = None
+    # NEW (spec §1.1): HA room-level occupancy sensor for the zone's parent room.
+    # Already exists in HomeOps DB/API (migration 014); was previously unused by CORTEX.
+    # Used in Override 2 to resolve floor-level → room-level occupancy check.
     child_zones: list[int] = field(default_factory=list)
     # child_zones: reverse index of contained_by — computed by homeops_adapter each tick
 
@@ -140,6 +147,16 @@ class ContextSnapshot:
     # True if any 2F sleep zone occupied + in 9pm–8am
     quiet_hours_1f: bool | None = None
     # True in 10pm–7am window
+
+    # Presence fields — parsed from sensor.home_context attributes (spec §2)
+    # Populated by synth; consumed by R1 occupancy-gate overrides.
+    home_count: int = -1
+    # -1 = unknown / degraded (fail-closed in the gate). 0 = empty house. ≥1 = occupied.
+    who_home: list[str] = field(default_factory=list)
+    # Friendly-name Title Case (["Carlos","Elena"]) — as returned by sensor.home_context.
+    # Elena carve-out in Override 2 compares case-insensitively against "elena".
+    home_empty: bool = False
+    # True iff home_count == 0 (known empty). Unknown → False (fail-closed).
 
     # Degraded-context flags (§8.5)
     degraded: bool = False
