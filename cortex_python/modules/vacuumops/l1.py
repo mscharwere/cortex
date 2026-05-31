@@ -63,7 +63,7 @@ class L1Decision(BaseModel):
     params_reason: str | None = None  # ≤120 chars
 
 
-def _resolve_zone_meta(zone_label: str, ctx: "ContextSnapshot") -> "ZoneMeta":
+def resolve_zone_meta(zone_label: str, ctx: "ContextSnapshot") -> "ZoneMeta":
     """Resolve ZoneMeta for a zone. Phase 1: single-zone, returns first entry.
     Phase 2: match by label field once ZoneMeta.label is added."""
     if not ctx.zone_metadata:
@@ -115,7 +115,7 @@ def _build_context_hash(
     # floor_type and debris_profile are included so that a metadata change
     # (e.g. floor type corrected in DB) busts the Redis cache rather than
     # returning a stale L1Decision computed under the old profile.
-    _zm = _resolve_zone_meta(zone, ctx)
+    _zm = resolve_zone_meta(zone, ctx)
 
     subset: dict[str, Any] = {
         "zone": zone,
@@ -248,7 +248,7 @@ def _render_prompt(
     # Resolve ZoneMeta for this zone via the shared helper.
     # Phase 1: single active zone — helper returns first entry (correct).
     # Phase 2+: helper will match by label field once ZoneMeta.label is added.
-    zone_meta = _resolve_zone_meta(zone, ctx)
+    zone_meta = resolve_zone_meta(zone, ctx)
 
     zone_score = ctx.zone_scores.get(zone)
 

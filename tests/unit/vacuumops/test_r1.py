@@ -474,7 +474,7 @@ async def test_run_r1_room_scoped_hallway_clear_kitchen_occupied(litter_box_job,
         bypass_mode="room_scoped", bypass_reason_str="single_person_low_disruption",
     )
     assert result == "PASS"
-    assert "occ_bypass" in reason or "occ_relax" in reason or "all_rules_pass" in reason
+    assert "occ_bypass:single_person_low_disruption" in reason or "occ_relax:single_person_low_disruption" in reason
 
 
 @pytest.mark.asyncio

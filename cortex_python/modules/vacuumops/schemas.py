@@ -158,12 +158,6 @@ class ContextSnapshot:
     home_empty: bool = False
     # True iff home_count == 0 (known empty). Unknown → False (fail-closed).
 
-    # Per-zone occupancy-gate bypass state (set in evaluate_zone before L1, not in synth)
-    # These are transient per-zone values; they are NOT set on the shared ctx object.
-    # They live here for typing purposes; actual values are threaded as local vars in loop.py.
-    occupancy_gate_bypassed: bool = False
-    bypass_reason: str | None = None
-
     # Degraded-context flags (§8.5)
     degraded: bool = False
     # True if HA WS was down and snapshot used cached data

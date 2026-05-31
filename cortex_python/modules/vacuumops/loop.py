@@ -40,7 +40,7 @@ from cortex_python.adapters.litellm_client import build_litellm_client
 from cortex_python.config.settings import Settings
 from cortex_python.modules.vacuumops.config import VacuumOpsConfig
 from cortex_python.modules.vacuumops.jobs import LitterBoxJob, VacuumJob
-from cortex_python.modules.vacuumops.l1 import L1Decision, resolve_params, run_l1
+from cortex_python.modules.vacuumops.l1 import L1Decision, resolve_params, resolve_zone_meta, run_l1
 from cortex_python.modules.vacuumops.r0 import _ZONE_COOLDOWN_KEY as _R0_ZONE_COOLDOWN_KEY
 from cortex_python.modules.vacuumops.r0 import run_r0
 from cortex_python.modules.vacuumops.r1 import _ROBOT_COOLDOWN_KEY as _R1_ROBOT_COOLDOWN_KEY
@@ -214,8 +214,7 @@ async def evaluate_zone(
     # ── Occupancy-gate override — compute once per (zone, tick) ─────────────
     # Resolve zone metadata for this zone (Phase 1: single zone, first entry is correct).
     # Phase 2: ZoneMeta needs a label field to match by name (TODO already in l1.py).
-    from cortex_python.modules.vacuumops.l1 import _resolve_zone_meta
-    zone_meta_for_bypass = _resolve_zone_meta(zone, ctx)
+    zone_meta_for_bypass = resolve_zone_meta(zone, ctx)
     bypass_mode, bypass_reason_str = occupancy_gate_bypass(zone, ctx, zone_meta_for_bypass)
     bypassed_for_zone = bypass_mode != "none"
 
