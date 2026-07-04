@@ -63,14 +63,12 @@ class L1Decision(BaseModel):
     params_reason: str | None = None  # ≤120 chars
 
 
-def resolve_zone_meta(zone_label: str, ctx: ContextSnapshot) -> ZoneMeta:
-    """Resolve ZoneMeta for a zone. Phase 1: single-zone, returns first entry.
-    Phase 2: match by label field once ZoneMeta.label is added."""
-    if not ctx.zone_metadata:
-        return ZoneMeta(zone_id=0, unit_id=0)
-    # Phase 1: single active zone — first (only) entry is correct
-    # Phase 2 TODO: match by zone_label when ZoneMeta gains a label field
-    return next(iter(ctx.zone_metadata.values()))
+def resolve_zone_meta(zone_id: int, ctx: ContextSnapshot) -> ZoneMeta:
+    """Resolve ZoneMeta for a zone by zone_id. Returns a safe default if unavailable."""
+    meta = ctx.zone_metadata.get(zone_id)
+    if meta is None:
+        return ZoneMeta(zone_id=zone_id, unit_id=0)
+    return meta
 
 
 def resolve_params(job: VacuumJob, l1: L1Decision | None) -> tuple[str, str, str]:
@@ -96,7 +94,7 @@ def resolve_params(job: VacuumJob, l1: L1Decision | None) -> tuple[str, str, str
 
 def _build_context_hash(
     job: VacuumJob,
-    zone: str,
+    zone_id: int,
     ctx: ContextSnapshot,
     bypassed_for_zone: bool = False,
     reason_for_zone: str | None = None,
@@ -115,11 +113,11 @@ def _build_context_hash(
     # floor_type and debris_profile are included so that a metadata change
     # (e.g. floor type corrected in DB) busts the Redis cache rather than
     # returning a stale L1Decision computed under the old profile.
-    _zm = resolve_zone_meta(zone, ctx)
+    _zm = resolve_zone_meta(zone_id, ctx)
 
     subset: dict[str, Any] = {
-        "zone": zone,
-        "score": round(ctx.zone_scores.get(zone, 0.0)),
+        "zone": zone_id,
+        "score": round(ctx.zone_scores.get(zone_id, 0.0)),
         "zone_meta": {
             "floor_type": _zm.floor_type,
             "debris_profile": sorted(_zm.debris_profile) if _zm.debris_profile else [],
@@ -170,7 +168,7 @@ def _build_context_hash(
 
 def _render_prompt(
     job: VacuumJob,
-    zone: str,
+    zone_id: int,
     ctx: ContextSnapshot,
     marginal_result: tuple[str, str, str],
     prompt_template: str,
@@ -235,22 +233,26 @@ def _render_prompt(
 
     events = [EventView(e) for e in ctx.upcoming_events]
 
-    # Namespace object for ctx access in template
+    # Namespace object for ctx access in template.
+    # zone_scores is exposed as label-keyed for template backward compat
+    # (templates may reference ctx.zone_scores["label"]).
+    zone_scores_by_label = {
+        info.label: score
+        for zid, score in ctx.zone_scores.items()
+        if (info := ctx.zone_info.get(zid)) is not None
+    }
+
     class CtxView:
         def __init__(self) -> None:
             self.timestamp_pst = ts_pst_str
-            self.zone_scores = ctx.zone_scores
+            self.zone_scores = zone_scores_by_label
             self.people = ctx.people
             self.rooms = ctx.rooms
             self.robot_states = ctx.robot_states
             self.upcoming_events = events
 
-    # Resolve ZoneMeta for this zone via the shared helper.
-    # Phase 1: single active zone — helper returns first entry (correct).
-    # Phase 2+: helper will match by label field once ZoneMeta.label is added.
-    zone_meta = resolve_zone_meta(zone, ctx)
-
-    zone_score = ctx.zone_scores.get(zone)
+    zone_meta = resolve_zone_meta(zone_id, ctx)
+    zone_score = ctx.zone_scores.get(zone_id)
 
     # Render
     tmpl = env.from_string(prompt_template)
@@ -279,7 +281,7 @@ def _render_prompt(
 
 async def run_l1(
     job: VacuumJob,
-    zone: str,
+    zone: int,
     ctx: ContextSnapshot,
     marginal_result: tuple[str, str, str],
     settings: Settings,
@@ -305,10 +307,11 @@ async def run_l1(
 
     Spec: §7.3
     """
+    zone_id = zone  # alias for clarity
     # Check Redis cache first
     context_hash = _build_context_hash(
         job,
-        zone,
+        zone_id,
         ctx,
         bypassed_for_zone=bypassed_for_zone,
         reason_for_zone=reason_for_zone,
@@ -319,16 +322,16 @@ async def run_l1(
         cached = await redis_client.get(cache_key)
         if cached:
             decision = L1Decision.model_validate_json(cached)
-            log.debug("l1_cache_hit", job_id=job.job_id, zone=zone, cache_key=cache_key)
+            log.debug("l1_cache_hit", job_id=job.job_id, zone_id=zone_id, cache_key=cache_key)
             return decision
     except Exception as exc:
-        log.warning("l1_cache_read_failed", job_id=job.job_id, zone=zone, error=str(exc))
+        log.warning("l1_cache_read_failed", job_id=job.job_id, zone_id=zone_id, error=str(exc))
 
     # Render prompt
     try:
         prompt = _render_prompt(
             job,
-            zone,
+            zone_id,
             ctx,
             marginal_result,
             prompt_template,
@@ -337,7 +340,7 @@ async def run_l1(
             reason_for_zone=reason_for_zone,
         )
     except Exception as exc:
-        log.error("l1_prompt_render_failed", job_id=job.job_id, zone=zone, error=str(exc))
+        log.error("l1_prompt_render_failed", job_id=job.job_id, zone_id=zone_id, error=str(exc))
         return L1Decision(
             decision="defer",
             confidence=0.0,
@@ -364,10 +367,10 @@ async def run_l1(
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
     except httpx.TimeoutException:
-        log.warning("l1_timeout", job_id=job.job_id, zone=zone)
+        log.warning("l1_timeout", job_id=job.job_id, zone_id=zone_id)
         return L1Decision(decision="defer", confidence=0.0, reason="l1_timeout")
     except Exception as exc:
-        log.error("l1_call_failed", job_id=job.job_id, zone=zone, error=str(exc))
+        log.error("l1_call_failed", job_id=job.job_id, zone_id=zone_id, error=str(exc))
         return L1Decision(decision="defer", confidence=0.0, reason="l1_schema_fail")
 
     # Parse response — extract JSON from content
@@ -382,7 +385,7 @@ async def run_l1(
         log.warning(
             "l1_schema_fail",
             job_id=job.job_id,
-            zone=zone,
+            zone_id=zone_id,
             content=content[:200],
             error=str(exc),
         )
@@ -402,12 +405,12 @@ async def run_l1(
             ex=_L1_CACHE_TTL,
         )
     except Exception as exc:
-        log.warning("l1_cache_write_failed", job_id=job.job_id, zone=zone, error=str(exc))
+        log.warning("l1_cache_write_failed", job_id=job.job_id, zone_id=zone_id, error=str(exc))
 
     log.info(
         "l1_decision",
         job_id=job.job_id,
-        zone=zone,
+        zone_id=zone_id,
         decision=decision.decision,
         confidence=decision.confidence,
         reason=decision.reason,

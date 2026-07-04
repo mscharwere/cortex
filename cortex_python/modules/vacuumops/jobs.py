@@ -25,7 +25,7 @@ class VacuumJob:
     # Identity
     job_id: str  # stable string, e.g. "ethan_3f_litter_box"
     robot: str  # "ethan" | "sam" | "saros"
-    zones: list[str]  # HomeOps zone_label values (must exist in vac_zone_cleanliness)
+    zones: list[int]  # HomeOps zone_id values (must exist in vac_zone_cleanliness)
     floor: str = "1F"  # operating floor — used by floor_clearance_check
 
     # Noise model inputs (§6)
@@ -81,7 +81,7 @@ class Ethan3FLitterBoxJob(VacuumJob):
 
     job_id: str = "ethan_3f_litter_box"
     robot: str = "ethan"
-    zones: list[str] = field(default_factory=lambda: ["Litter Box"])
+    zones: list[int] = field(default_factory=lambda: [14])
     floor: str = "3F"
     effectiveness_scope: str = "none"
     noise_level: int = 1
@@ -120,7 +120,7 @@ class Ethan3FRoomsJob(VacuumJob):
 
     job_id: str = "ethan_3f_rooms"
     robot: str = "ethan"
-    zones: list[str] = field(default_factory=lambda: ["Loft", "Office", "Gym"])
+    zones: list[int] = field(default_factory=lambda: [15, 16, 17])
     floor: str = "3F"
     effectiveness_scope: str = "floor"
     noise_level: int = 2
@@ -161,7 +161,7 @@ class Saros1FLitterBoxJob(VacuumJob):
 
     job_id: str = "saros_1f_litter_box"
     robot: str = "saros"
-    zones: list[str] = field(default_factory=lambda: ["Litter Box"])
+    zones: list[int] = field(default_factory=lambda: [23])
     floor: str = "1F"
     effectiveness_scope: str = "floor"
     noise_level: int = 1
@@ -200,15 +200,9 @@ class Saros1FRoomsJob(VacuumJob):
 
     job_id: str = "saros_1f_rooms"
     robot: str = "saros"
-    zones: list[str] = field(
-        default_factory=lambda: [
-            "Kitchen",
-            "Bathroom",
-            "Living Room",
-            "Hallway",
-            "Prep Area",
-            "Dining Table",
-        ]
+    zones: list[int] = field(
+        default_factory=lambda: [19, 20, 21, 22, 24, 25]
+        # Kitchen=19, Bathroom=20, Living Room=21, Hallway=22, Prep Area=24, Dining Table=25
     )
     floor: str = "1F"
     effectiveness_scope: str = "floor"
@@ -250,15 +244,10 @@ class Sam2FJob(VacuumJob):
 
     job_id: str = "sam_2f_rooms"
     robot: str = "sam"
-    zones: list[str] = field(
-        default_factory=lambda: [
-            "Master Bathroom",
-            "Master Bedroom",
-            "Upper Hallway",
-            "Carlitos Room",
-            "Daniel's Room",
-            "Kids Table Area",
-        ]
+    zones: list[int] = field(
+        default_factory=lambda: [1, 2, 3, 4, 5, 6]
+        # Master Bathroom=1, Master Bedroom=2, Upper Hallway=3,
+        # Carlitos Room=4, Kids Table Area=5, Daniel's Room=6
     )
     floor: str = "2F"
     effectiveness_scope: str = "room_only"

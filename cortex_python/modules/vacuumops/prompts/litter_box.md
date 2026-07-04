@@ -13,7 +13,7 @@ Decide whether Ethan (Roomba j9+, 1F) should be dispatched RIGHT NOW to clean th
 
 # Current context snapshot
 Timestamp (PST): {{ ctx.timestamp_pst }}
-Zone dirtiness score: {{ ctx.zone_scores["Litter Box"] }} / 100 (threshold for dispatch: 50)
+Zone dirtiness score: {{ zone_score }} / 100 (threshold for dispatch: 50)
 Time since last clean: {{ time_since_last_clean }}
 
 ## Home Occupancy

@@ -17,16 +17,16 @@ import redis.asyncio as aioredis
 from cortex_python.modules.vacuumops.jobs import VacuumJob
 from cortex_python.modules.vacuumops.schemas import ContextSnapshot
 
-# Redis key template for per-zone cooldown. Full key:
-# cortex:vacuumops:cooldown:litter_box_clean:<zone_label>
+# Redis key template for per-zone cooldown.
+# Full key: cortex:vacuumops:cooldown:<job_id>:<zone_id>
 # Spec §8.4, §7.1
-_ZONE_COOLDOWN_KEY = "cortex:vacuumops:cooldown:{job_id}:{zone_label}"
+_ZONE_COOLDOWN_KEY = "cortex:vacuumops:cooldown:{job_id}:{zone_id}"
 
 # Robot states that mean the robot is NOT available for dispatch
 _ACTIVE_STATES = {"cleaning", "returning", "error", "paused"}
 
 
-def robot_docked(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[bool, str]:
+def robot_docked(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tuple[bool, str]:
     """R0-1: Robot must be docked (idle at home base).
 
     Source: ctx.robot_states[job.robot].state == "docked"
@@ -39,7 +39,7 @@ def robot_docked(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[bool,
     return True, "r0_pass"
 
 
-def battery_above_30(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[bool, str]:
+def battery_above_30(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tuple[bool, str]:
     """R0-2: Robot battery must be above 30%.
 
     Source: ctx.robot_states[job.robot].battery_pct > 30
@@ -52,24 +52,24 @@ def battery_above_30(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[b
     return True, "r0_pass"
 
 
-def score_above_threshold(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[bool, str]:
+def score_above_threshold(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tuple[bool, str]:
     """R0-3: Zone dirtiness score must exceed dispatch_threshold.
 
-    Source: ctx.zone_scores[zone] > job.dispatch_threshold
+    Source: ctx.zone_scores[zone_id] > job.dispatch_threshold
     Per spec §7.1 note: threshold for R0 check is job.dispatch_threshold.
     Bundle threshold (D11) is only evaluated in loop.py batch assembly.
     """
-    score = ctx.zone_scores.get(zone)
+    score = ctx.zone_scores.get(zone_id)
     if score is None:
-        return False, f"zone_score_missing:{zone}"
+        return False, f"zone_score_missing:{zone_id}"
     if score <= job.dispatch_threshold:
         thresh = job.dispatch_threshold
-        reason = f"score_below_threshold:{zone}:score={score:.1f}:threshold={thresh}"
+        reason = f"score_below_threshold:{zone_id}:score={score:.1f}:threshold={thresh}"
         return False, reason
     return True, "r0_pass"
 
 
-def not_in_active_mission(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[bool, str]:
+def not_in_active_mission(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tuple[bool, str]:
     """R0-4: Robot must not be in an active mission state.
 
     Active states: cleaning | returning | error | paused
@@ -83,27 +83,27 @@ def not_in_active_mission(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tu
 
 
 async def not_in_zone_cooldown(
-    job: VacuumJob, zone: str, ctx: ContextSnapshot, redis_client: aioredis.Redis
+    job: VacuumJob, zone_id: int, ctx: ContextSnapshot, redis_client: aioredis.Redis
 ) -> tuple[bool, str]:
     """R0-5: Per-zone cooldown must not be active.
 
-    Redis key: cortex:vacuumops:cooldown:<job_id>:<zone_label>
+    Redis key: cortex:vacuumops:cooldown:<job_id>:<zone_id>
     Key is set on dispatch (EX = cooldown_minutes * 60). R0 EXISTS-tests it.
 
     On dock event (§8.4), the key may be cleared early — so cooldown is a
     min-wait, not a max-wait.
     """
-    key = _ZONE_COOLDOWN_KEY.format(job_id=job.job_id, zone_label=zone)
+    key = _ZONE_COOLDOWN_KEY.format(job_id=job.job_id, zone_id=zone_id)
     exists = await redis_client.exists(key)
     if exists:
         ttl = await redis_client.ttl(key)
-        return False, f"zone_cooldown_active:{zone}:ttl={ttl}s"
+        return False, f"zone_cooldown_active:{zone_id}:ttl={ttl}s"
     return True, "r0_pass"
 
 
 async def run_r0(
     job: VacuumJob,
-    zone: str,
+    zone_id: int,
     ctx: ContextSnapshot,
     redis_client: aioredis.Redis,
 ) -> tuple[bool, str]:
@@ -116,12 +116,12 @@ async def run_r0(
     """
     # Sync checks — run in sequence; stop at first failure
     for check_fn in (robot_docked, battery_above_30, score_above_threshold, not_in_active_mission):
-        passed, reason = check_fn(job, zone, ctx)
+        passed, reason = check_fn(job, zone_id, ctx)
         if not passed:
             return False, reason
 
     # Async check — Redis cooldown
-    passed, reason = await not_in_zone_cooldown(job, zone, ctx, redis_client)
+    passed, reason = await not_in_zone_cooldown(job, zone_id, ctx, redis_client)
     if not passed:
         return False, reason
 

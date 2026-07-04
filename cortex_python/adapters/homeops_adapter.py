@@ -18,7 +18,34 @@ import httpx
 import structlog
 
 from cortex_python.config.settings import Settings
-from cortex_python.modules.vacuumops.schemas import DecisionEntry, ZoneMeta
+from cortex_python.modules.vacuumops.schemas import DecisionEntry, ZoneInfo, ZoneMeta
+
+# Explicit zone-label → ctx.rooms key mapping for every known zone.
+# room_key=None means the zone has no parent room sensor (sub-zone);
+# zone_active_use_check and door_open_check treat these as always clear.
+# Add a new entry here whenever a zone is added to HomeOps or an HA sensor
+# is renamed — never rely on convention-based derivation.
+_ZONE_LABEL_TO_ROOM_KEY: dict[str, str | None] = {
+    # Ethan 3F
+    "Litter Box": None,
+    "Loft": "loft",
+    "Office": "office",
+    "Gym": "gym",
+    # Saros 1F
+    "Kitchen": "kitchen",
+    "Bathroom": "bathroom",
+    "Living Room": "living_room",
+    "Hallway": "hallway",
+    "Prep Area": None,
+    "Dining Table": "dining_room",
+    # Sam 2F
+    "Master Bathroom": "master_bath",
+    "Master Bedroom": "master_bedroom",
+    "Upper Hallway": "upper_hallway",
+    "Carlitos Room": "carlitos_room",
+    "Kids Table Area": None,
+    "Daniel's Room": "daniel_room",
+}
 
 log = structlog.get_logger()
 
@@ -45,30 +72,51 @@ class HomeOpsAdapter:
             follow_redirects=True,
         )
 
-    async def get_zone_scores(self) -> dict[str, float]:
-        """Fetch current zone dirtiness scores from HomeOps.
+    async def get_zone_data(self) -> tuple[dict[int, float], dict[int, ZoneInfo]]:
+        """Fetch zone dirtiness scores and display metadata from HomeOps.
 
         GET /api/vacuum/units
-        Parses response: data[].zones[].{label, score}
-        Returns a flat dict: {"Litter Box": 78.3, "Hallway": 41.0, ...}
+        Parses response: data[].{id, floor, zones[].{id, label, score}}
+        Returns:
+          scores:    dict[zone_id → score]
+          zone_info: dict[zone_id → ZoneInfo]
 
-        Returns {} on failure (caller should skip tick if scores unavailable).
-        Raises on error so the caller (synth) can handle the skip-tick path
-        per §8.5.
+        Raises on error so the caller (synth) can handle the skip-tick path per §8.5.
         """
         async with self._client() as client:
             r = await client.get("/api/vacuum/units")
             r.raise_for_status()
             data = r.json()
 
-            scores: dict[str, float] = {}
+            scores: dict[int, float] = {}
+            zone_info: dict[int, ZoneInfo] = {}
+
             for unit in data.get("data", []):
+                unit_id = unit.get("id")
+                floor = unit.get("floor", "")
+                if unit_id is None:
+                    continue
                 for zone in unit.get("zones", []):
+                    zone_id = zone.get("id")
                     label = zone.get("label")
                     score = zone.get("score")
-                    if label is not None and score is not None:
-                        scores[label] = float(score)
-            return scores
+                    if zone_id is None or label is None:
+                        continue
+                    zone_id = int(zone_id)
+                    display = f"{floor} {label}".strip() if floor else label
+                    scores[zone_id] = float(score) if score is not None else 0.0
+                    room_key = _ZONE_LABEL_TO_ROOM_KEY.get(label)
+                    if label not in _ZONE_LABEL_TO_ROOM_KEY:
+                        log.warning("zone_label_not_in_room_key_map", label=label, zone_id=zone_id)
+                    zone_info[zone_id] = ZoneInfo(
+                        label=label,
+                        display=display,
+                        unit_id=int(unit_id),
+                        floor=floor,
+                        room_key=room_key,
+                    )
+
+            return scores, zone_info
 
     async def get_zone_metadata(self) -> dict[int, ZoneMeta]:
         """Fetch per-zone structural metadata from HomeOps.
@@ -106,7 +154,8 @@ class HomeOpsAdapter:
                 contained_by=z.get("contained_by"),
                 dispatchable=z.get("dispatchable", True),
                 low_disruption=bool(z.get("low_disruption", False)),
-                # Spec §3: new column; seeded true for Litter Box by HomeOps migration 20260530000000.
+                # Spec §3: new column; seeded true for Litter Box by HomeOps migration
+                # 20260530000000.
                 occupancy_sensor=z.get("occupancy_sensor"),
                 # Spec §1.1: already in HomeOps API response (migration 014); was dropped here.
                 # Now mapped so Override 2 can resolve the zone's parent room key.

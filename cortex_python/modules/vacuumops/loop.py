@@ -181,31 +181,32 @@ def render_patterns_for(job: VacuumJob, current_time: datetime, patterns: list[d
 
 async def evaluate_zone(
     job: VacuumJob,
-    zone: str,
+    zone: int,
     ctx: ContextSnapshot,
     redis_client: aioredis.Redis,
     settings: Settings,
     litellm_client: Any,
     vacuumops_cfg: VacuumOpsConfig,
     patterns: list[dict],
-    l1_results: dict[tuple[str, str], L1Decision] | None = None,
+    l1_results: dict[tuple[str, int], L1Decision] | None = None,
 ) -> ZoneOutcome:
-    """Evaluate one (job, zone) pair through R0 → R1 → L1.
+    """Evaluate one (job, zone_id) pair through R0 → R1 → L1.
 
     Returns a ZoneOutcome (never raises; all failures are captured as outcomes).
     Batching happens upstream in the main loop.
 
     Spec: §8.3 evaluate_zone pseudocode
     """
-    score = ctx.zone_scores.get(zone, 0.0)
+    zone_id = zone  # alias for clarity throughout
+    score = ctx.zone_scores.get(zone_id, 0.0)
 
     # R0 — hard gates
     try:
-        r0_passed, r0_reason = await run_r0(job, zone, ctx, redis_client)
+        r0_passed, r0_reason = await run_r0(job, zone_id, ctx, redis_client)
     except Exception as exc:
-        log.exception("r0_error", job_id=job.job_id, zone=zone)
+        log.exception("r0_error", job_id=job.job_id, zone_id=zone_id)
         return ZoneOutcome(
-            zone=zone,
+            zone=zone_id,
             action="defer",
             tier="R0",
             gate_failed="r0",
@@ -215,7 +216,7 @@ async def evaluate_zone(
 
     if not r0_passed:
         return ZoneOutcome(
-            zone=zone,
+            zone=zone_id,
             action="defer",
             tier="R0",
             gate_failed="r0",
@@ -224,17 +225,15 @@ async def evaluate_zone(
         )
 
     # ── Occupancy-gate override — compute once per (zone, tick) ─────────────
-    # Resolve zone metadata for this zone (Phase 1: single zone, first entry is correct).
-    # Phase 2: ZoneMeta needs a label field to match by name (TODO already in l1.py).
-    zone_meta_for_bypass = resolve_zone_meta(zone, ctx)
-    bypass_mode, bypass_reason_str = occupancy_gate_bypass(zone, ctx, zone_meta_for_bypass)
+    zone_meta_for_bypass = resolve_zone_meta(zone_id, ctx)
+    bypass_mode, bypass_reason_str = occupancy_gate_bypass(zone_id, ctx, zone_meta_for_bypass)
     bypassed_for_zone = bypass_mode != "none"
 
     if bypassed_for_zone:
         log.info(
             "occupancy_gate_bypassed",
             job_id=job.job_id,
-            zone=zone,
+            zone_id=zone_id,
             mode=bypass_mode,
             reason=bypass_reason_str,
             tick_id=ctx.tick_id,
@@ -244,7 +243,7 @@ async def evaluate_zone(
     try:
         r1_result, r1_gate_failed, r1_reason = await run_r1(
             job,
-            zone,
+            zone_id,
             ctx,
             redis_client,
             patterns,
@@ -253,9 +252,9 @@ async def evaluate_zone(
             bypass_reason_str=bypass_reason_str,
         )
     except Exception as exc:
-        log.exception("r1_error", job_id=job.job_id, zone=zone)
+        log.exception("r1_error", job_id=job.job_id, zone_id=zone_id)
         return ZoneOutcome(
-            zone=zone,
+            zone=zone_id,
             action="defer",
             tier="R1",
             gate_failed="effectiveness",
@@ -265,7 +264,7 @@ async def evaluate_zone(
 
     if r1_result == "FAIL":
         return ZoneOutcome(
-            zone=zone,
+            zone=zone_id,
             action="defer",
             tier="R1",
             gate_failed=r1_gate_failed,
@@ -276,7 +275,7 @@ async def evaluate_zone(
     if r1_result == "PASS" and not job.l1_required:
         # All rules passed strongly — no L1 needed
         return ZoneOutcome(
-            zone=zone,
+            zone=zone_id,
             action="dispatch",
             tier="R1",
             gate_failed="none",
@@ -290,7 +289,7 @@ async def evaluate_zone(
         patterns_block = render_patterns_for(job, ctx.timestamp, patterns)
         l1_decision = await run_l1(
             job=job,
-            zone=zone,
+            zone=zone_id,
             ctx=ctx,
             marginal_result=(r1_result, r1_gate_failed, r1_reason),
             settings=settings,
@@ -302,9 +301,9 @@ async def evaluate_zone(
             reason_for_zone=bypass_reason_str,
         )
     except Exception as exc:
-        log.exception("l1_error", job_id=job.job_id, zone=zone)
+        log.exception("l1_error", job_id=job.job_id, zone_id=zone_id)
         return ZoneOutcome(
-            zone=zone,
+            zone=zone_id,
             action="defer",
             tier="L1",
             gate_failed="l1",
@@ -317,12 +316,12 @@ async def evaluate_zone(
         log.info(
             "l1_low_confidence",
             job_id=job.job_id,
-            zone=zone,
+            zone_id=zone_id,
             confidence=l1_decision.confidence,
             threshold=vacuumops_cfg.l1_overflow_confidence,
         )
         return ZoneOutcome(
-            zone=zone,
+            zone=zone_id,
             action="defer",
             tier="L1",
             gate_failed="l1",
@@ -333,7 +332,7 @@ async def evaluate_zone(
 
     if l1_decision.decision == "defer":
         return ZoneOutcome(
-            zone=zone,
+            zone=zone_id,
             action="defer",
             tier="L1",
             gate_failed="comfort",
@@ -344,10 +343,10 @@ async def evaluate_zone(
 
     # Populate l1_results so assemble_batch can resolve cleaning params
     if l1_results is not None:
-        l1_results[(job.job_id, zone)] = l1_decision
+        l1_results[(job.job_id, zone_id)] = l1_decision
 
     return ZoneOutcome(
-        zone=zone,
+        zone=zone_id,
         action="dispatch",
         tier="L1",
         gate_failed="none",
@@ -384,23 +383,18 @@ def dedup_contained(
 # ── Batch assembly ─────────────────────────────────────────────────────────────
 
 
-def _zone_effective_simple(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> bool:
-    """Quick effectiveness check for bundle sweep (D11).
-
-    Does not need the full R1 effectiveness suite — just checks occupancy and
-    floor clearance. Pattern lookahead is the expensive check; bundle eligibility
-    uses simplified gates.
-    """
+def _zone_effective_simple(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> bool:
+    """Quick effectiveness check for bundle sweep (D11)."""
     from cortex_python.modules.vacuumops.r1 import floor_clearance_check, zone_active_use_check
 
-    result, _, _ = zone_active_use_check(job, zone, ctx)
+    result, _, _ = zone_active_use_check(job, zone_id, ctx)
     if result == "FAIL":
         return False
-    result, _, _ = floor_clearance_check(job, zone, ctx)
+    result, _, _ = floor_clearance_check(job, zone_id, ctx)
     return result != "FAIL"
 
 
-def _noise_acceptable_simple(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> bool:
+def _noise_acceptable_simple(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> bool:
     """Quick noise check for bundle sweep (D11)."""
     from cortex_python.modules.vacuumops.noise import noise_budget, noise_impact
     from cortex_python.modules.vacuumops.r1 import noise_radius_check
@@ -409,23 +403,33 @@ def _noise_acceptable_simple(job: VacuumJob, zone: str, ctx: ContextSnapshot) ->
     budget = noise_budget(ctx)
     if impact > budget:
         return False
-    result, _, _ = noise_radius_check(job, zone, ctx)
+    result, _, _ = noise_radius_check(job, zone_id, ctx)
     return result != "FAIL"
 
 
-async def _per_zone_cooldown_clear(job: VacuumJob, zone: str, redis_client: aioredis.Redis) -> bool:
+async def _per_zone_cooldown_clear(
+    job: VacuumJob,
+    zone_id: int,
+    redis_client: aioredis.Redis,
+) -> bool:
     """Check if per-zone cooldown is clear (for bundle sweep)."""
-    key = _R0_ZONE_COOLDOWN_KEY.format(job_id=job.job_id, zone_label=zone)
+    key = _R0_ZONE_COOLDOWN_KEY.format(job_id=job.job_id, zone_id=zone_id)
     exists = await redis_client.exists(key)
     return not bool(exists)
 
 
-def _job_for_zone(zone: str) -> VacuumJob:
-    """Look up the job that owns a given zone. Falls back to first active job."""
+def _job_for_zone(zone_id: int) -> VacuumJob:
+    """Look up the job that owns a given zone_id. Falls back to first active job."""
     for job in ACTIVE_JOBS:
-        if zone in job.zones:
+        if zone_id in job.zones:
             return job
     return ACTIVE_JOBS[0]
+
+
+def _zone_display(zone_id: int, ctx: ContextSnapshot) -> str:
+    """Return the display label for a zone_id, falling back to str(zone_id)."""
+    info = ctx.zone_info.get(zone_id)
+    return info.display if info else str(zone_id)
 
 
 def assemble_batch(
@@ -433,7 +437,7 @@ def assemble_batch(
     zone_outcomes: list[ZoneOutcome],
     ctx: ContextSnapshot,
     jobs: list[VacuumJob],
-    l1_results: dict | None = None,
+    l1_results: dict[tuple[str, int], Any] | None = None,
 ) -> list[BatchEntry]:
     """Assemble a dispatch batch for one robot (D10 + D11).
 
@@ -443,7 +447,7 @@ def assemble_batch(
     because bundle candidates that failed R0 (including cooldown) already have
     action="defer" with gate_failed="r0".
 
-    l1_results: dict keyed by (job_id, zone_label) → L1Decision.
+    l1_results: dict keyed by (job_id, zone_id) → L1Decision.
     Used to resolve passes/intensity via resolve_params(). If None or key absent,
     falls back to job.cleaning_params defaults (source="default").
 
@@ -503,7 +507,7 @@ def assemble_batch(
 
         if (
             score >= bundle_floor
-            and _zone_effective_simple(job, zo.zone, ctx)
+            and _zone_effective_simple(job, zo.zone, ctx)  # zo.zone is int
             and _noise_acceptable_simple(job, zo.zone, ctx)
         ):
             # Bundled zones skip L1 (D11) — use job defaults
@@ -561,7 +565,10 @@ async def dispatch_batch(
 
     zones_payload = [
         {
-            "label": entry.zone,
+            # HomeOps /api/vacuum/trigger still expects zone label strings — resolve at dispatch
+            "label": (
+                ctx.zone_info[entry.zone].label if entry.zone in ctx.zone_info else str(entry.zone)
+            ),
             "passes": entry.passes,
             "intensity": entry.intensity,
             "bundled": entry.bundled,
@@ -575,7 +582,7 @@ async def dispatch_batch(
         log.info(
             "dispatch_batch_dry_run",
             robot=robot,
-            zones=[e.zone for e in batch],
+            zones=[_zone_display(e.zone, ctx) for e in batch],
             tick_id=tick_id,
         )
         return {
@@ -593,7 +600,7 @@ async def dispatch_batch(
     log.info(
         "dispatch_batch_sent",
         robot=robot,
-        zones=[e.zone for e in batch],
+        zones=[_zone_display(e.zone, ctx) for e in batch],
         tick_id=tick_id,
         result=result,
     )
@@ -608,15 +615,15 @@ async def _set_per_zone_cooldowns(
 ) -> None:
     """Set per-zone cooldown keys for every zone in the dispatched batch.
 
-    Key: cortex:vacuumops:cooldown:<job_id>:<zone_label>
+    Key: cortex:vacuumops:cooldown:<job_id>:<zone_id>
     TTL: job.cooldown_minutes * 60 seconds
     """
     for entry in batch:
         job = _job_for_zone(entry.zone)
-        key = _R0_ZONE_COOLDOWN_KEY.format(job_id=job.job_id, zone_label=entry.zone)
+        key = _R0_ZONE_COOLDOWN_KEY.format(job_id=job.job_id, zone_id=entry.zone)
         ttl = job.cooldown_minutes * 60
         await redis_client.set(key, 1, ex=ttl)
-        log.debug("zone_cooldown_set", zone=entry.zone, ttl_s=ttl)
+        log.debug("zone_cooldown_set", zone_id=entry.zone, ttl_s=ttl)
 
 
 async def _set_robot_cooldown(
@@ -686,7 +693,7 @@ async def persist_decision(
 
         zone_details = [
             ZoneDecisionDetail(
-                label=entry.zone,
+                label=_zone_display(entry.zone, ctx),
                 score=entry.score,
                 bundled=entry.bundled,
                 l1_confidence=entry.l1_confidence,
@@ -707,7 +714,7 @@ async def persist_decision(
             reason = dominant.reason
             zone_details = [
                 ZoneDecisionDetail(
-                    label=dominant.zone,
+                    label=_zone_display(dominant.zone, ctx),
                     score=dominant.score,
                     bundled=False,
                     l1_confidence=dominant.l1_confidence,
@@ -749,7 +756,7 @@ async def persist_decision(
                 "trigger_id": tick_id,
                 "context_snapshot": {
                     "robot": robot,
-                    "zone_scores": ctx.zone_scores,
+                    "zone_scores": {str(k): v for k, v in ctx.zone_scores.items()},
                     "people": {
                         k: {"activity": v.activity, "confidence": v.confidence}
                         for k, v in ctx.people.items()
@@ -909,7 +916,7 @@ async def vacuumops_loop(settings: Settings) -> None:
 
             # Group jobs by robot
             per_robot: dict[str, list[ZoneOutcome]] = defaultdict(list)
-            per_robot_l1: dict[str, dict[tuple[str, str], L1Decision]] = defaultdict(dict)
+            per_robot_l1: dict[str, dict[tuple[str, int], L1Decision]] = defaultdict(dict)
             any_robot_cooldown = False
             tick_has_l1_timeout = False
 
@@ -917,23 +924,23 @@ async def vacuumops_loop(settings: Settings) -> None:
                 # D12: per-robot cooldown short-circuit
                 if await _robot_cooldown_active(job.robot, redis_client):
                     any_robot_cooldown = True
-                    for zone in job.zones:
+                    for zone_id in job.zones:
                         per_robot[job.robot].append(
                             ZoneOutcome(
-                                zone=zone,
+                                zone=zone_id,
                                 action="defer",
                                 tier="R1",
                                 gate_failed="robot_cooldown",
                                 reason=f"robot_cooldown_active:{job.robot}",
-                                score=ctx.zone_scores.get(zone, 0.0),
+                                score=ctx.zone_scores.get(zone_id, 0.0),
                             )
                         )
                     continue
 
                 # Per-zone evaluations — parallel L1 calls where applicable (D13)
-                # l1_results collects L1Decision objects keyed by (job_id, zone_label)
+                # l1_results collects L1Decision objects keyed by (job_id, zone_id)
                 # so that assemble_batch can resolve cleaning params from L1 output.
-                l1_results: dict[tuple[str, str], L1Decision] = {}
+                l1_results: dict[tuple[str, int], L1Decision] = {}
                 zone_coros = [
                     evaluate_zone(
                         job=job,

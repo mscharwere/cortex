@@ -82,14 +82,14 @@ def test_battery_above_30_pass_31(litter_box_job):
 
 
 def test_score_above_threshold_pass(litter_box_job, clean_ctx):
-    # clean_ctx has score 75.0, threshold 50.0
-    passed, reason = score_above_threshold(litter_box_job, "Litter Box", clean_ctx)
+    # clean_ctx has score 75.0 at zone_id=14, threshold 50.0
+    passed, reason = score_above_threshold(litter_box_job, 14, clean_ctx)
     assert passed is True
 
 
 def test_score_above_threshold_fail_below(litter_box_job):
     ctx = make_snapshot(litter_box_score=30.0)
-    passed, reason = score_above_threshold(litter_box_job, "Litter Box", ctx)
+    passed, reason = score_above_threshold(litter_box_job, 14, ctx)
     assert passed is False
     assert "below_threshold" in reason
 
@@ -152,7 +152,7 @@ async def test_not_in_zone_cooldown_fail_active(litter_box_job, clean_ctx, mock_
 
 @pytest.mark.asyncio
 async def test_run_r0_all_pass(litter_box_job, clean_ctx, mock_redis):
-    passed, reason = await run_r0(litter_box_job, "Litter Box", clean_ctx, mock_redis)
+    passed, reason = await run_r0(litter_box_job, 14, clean_ctx, mock_redis)
     assert passed is True
     assert reason == "r0_pass"
 
@@ -170,7 +170,7 @@ async def test_run_r0_short_circuits_on_battery(litter_box_job, mock_redis):
 @pytest.mark.asyncio
 async def test_run_r0_short_circuits_on_score(litter_box_job, mock_redis):
     ctx = make_snapshot(litter_box_score=10.0)
-    passed, reason = await run_r0(litter_box_job, "Litter Box", ctx, mock_redis)
+    passed, reason = await run_r0(litter_box_job, 14, ctx, mock_redis)
     assert passed is False
     assert "below_threshold" in reason
     mock_redis.exists.assert_not_called()
