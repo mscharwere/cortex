@@ -81,7 +81,7 @@ class Ethan3FLitterBoxJob(VacuumJob):
 
     job_id: str = "ethan_3f_litter_box"
     robot: str = "ethan"
-    zones: list[str] = field(default_factory=lambda: ["Litter Box"])
+    zones: list[str] = field(default_factory=lambda: ["Litter Box 3F"])
     floor: str = "3F"
     effectiveness_scope: str = "none"
     noise_level: int = 1
@@ -161,7 +161,7 @@ class Saros1FLitterBoxJob(VacuumJob):
 
     job_id: str = "saros_1f_litter_box"
     robot: str = "saros"
-    zones: list[str] = field(default_factory=lambda: ["Litter Box"])
+    zones: list[str] = field(default_factory=lambda: ["Litter Box 1F"])
     floor: str = "1F"
     effectiveness_scope: str = "floor"
     noise_level: int = 1
