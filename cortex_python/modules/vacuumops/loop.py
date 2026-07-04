@@ -567,9 +567,7 @@ async def dispatch_batch(
         {
             # HomeOps /api/vacuum/trigger still expects zone label strings — resolve at dispatch
             "label": (
-                ctx.zone_info[entry.zone].label
-                if entry.zone in ctx.zone_info
-                else str(entry.zone)
+                ctx.zone_info[entry.zone].label if entry.zone in ctx.zone_info else str(entry.zone)
             ),
             "passes": entry.passes,
             "intensity": entry.intensity,

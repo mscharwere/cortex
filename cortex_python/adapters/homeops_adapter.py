@@ -27,24 +27,24 @@ from cortex_python.modules.vacuumops.schemas import DecisionEntry, ZoneInfo, Zon
 # is renamed — never rely on convention-based derivation.
 _ZONE_LABEL_TO_ROOM_KEY: dict[str, str | None] = {
     # Ethan 3F
-    "Litter Box":  None,
-    "Loft":        "loft",
-    "Office":      "office",
-    "Gym":         "gym",
+    "Litter Box": None,
+    "Loft": "loft",
+    "Office": "office",
+    "Gym": "gym",
     # Saros 1F
-    "Kitchen":      "kitchen",
-    "Bathroom":     "bathroom",
-    "Living Room":  "living_room",
-    "Hallway":      "hallway",
-    "Prep Area":    None,
+    "Kitchen": "kitchen",
+    "Bathroom": "bathroom",
+    "Living Room": "living_room",
+    "Hallway": "hallway",
+    "Prep Area": None,
     "Dining Table": "dining_room",
     # Sam 2F
     "Master Bathroom": "master_bath",
-    "Master Bedroom":  "master_bedroom",
-    "Upper Hallway":   "upper_hallway",
-    "Carlitos Room":   "carlitos_room",
+    "Master Bedroom": "master_bedroom",
+    "Upper Hallway": "upper_hallway",
+    "Carlitos Room": "carlitos_room",
     "Kids Table Area": None,
-    "Daniel's Room":   "daniel_room",
+    "Daniel's Room": "daniel_room",
 }
 
 log = structlog.get_logger()

@@ -106,10 +106,10 @@ class CalendarEvent:
 class ZoneInfo:
     """Per-zone display and routing metadata. Built from /api/vacuum/units each tick."""
 
-    label: str         # raw HomeOps zone label, e.g. "Litter Box"
-    display: str       # "{floor} {label}" for UI, e.g. "3F Litter Box"
+    label: str  # raw HomeOps zone label, e.g. "Litter Box"
+    display: str  # "{floor} {label}" for UI, e.g. "3F Litter Box"
     unit_id: int
-    floor: str         # operating floor: "1F" | "2F" | "3F"
+    floor: str  # operating floor: "1F" | "2F" | "3F"
     room_key: str | None  # snake_case ctx.rooms key; None for sub-zones (Litter Box, etc.)
 
 
