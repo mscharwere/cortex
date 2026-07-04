@@ -419,12 +419,16 @@ async def _per_zone_cooldown_clear(
 
 
 def _job_for_zone(zone_id: int) -> VacuumJob:
-    """Look up the job that owns a given zone_id. Falls back to first active job."""
+    """Look up the job that owns a given zone_id.
+
+    Raises ValueError if the zone_id is not found in any active job.
+    This surfaces misconfiguration immediately rather than silently using
+    wrong cooldown keys or cleaning params.
+    """
     for job in ACTIVE_JOBS:
         if zone_id in job.zones:
             return job
-    log.warning("_job_for_zone_fallback", zone_id=zone_id)
-    return ACTIVE_JOBS[0]
+    raise ValueError(f"zone_id={zone_id} not found in any active job")
 
 
 def _zone_display(zone_id: int, ctx: ContextSnapshot) -> str:
@@ -731,7 +735,7 @@ async def persist_decision(
 
         zone_details.append(
             ZoneDecisionDetail(
-                label=_zone_display(zo.zone, ctx),
+                label=info.label if info else str(zo.zone),
                 display=info.display if info else str(zo.zone),
                 score=zo.score,
                 bundled=(be.bundled if be else False),

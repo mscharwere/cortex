@@ -65,14 +65,18 @@ def test_resolve_params_default():
 # ── assemble_batch with l1_results ────────────────────────────────────────────
 
 
+_LITTER_BOX = 14  # Ethan 3F Litter Box (Ethan3FLitterBoxJob, robot="ethan")
+_LOFT = 15        # Ethan 3F Loft (Ethan3FRoomsJob, robot="ethan") — used in bundle tests
+
+
 def test_assemble_batch_uses_l1_results():
     """Candidate with l1_results entry → BatchEntry.params_source='l1', params_reason set."""
     job = Ethan3FLitterBoxJob()
     ctx = make_snapshot(litter_box_score=75.0)
 
-    # L1-decided outcome
+    # L1-decided outcome — use integer zone_id
     outcome = ZoneOutcome(
-        zone="Litter Box",
+        zone=_LITTER_BOX,
         action="dispatch",
         tier="L1",
         gate_failed="none",
@@ -89,7 +93,7 @@ def test_assemble_batch_uses_l1_results():
         intensity="high",
         params_reason="Heavy Oliver deposit — double pass + high suction",
     )
-    l1_results = {(job.job_id, "Litter Box"): l1_decision}
+    l1_results = {(job.job_id, _LITTER_BOX): l1_decision}
 
     batch = assemble_batch("ethan", [outcome], ctx, [job], l1_results=l1_results)
 
@@ -103,22 +107,26 @@ def test_assemble_batch_uses_l1_results():
 
 
 def test_assemble_batch_bundled_uses_default():
-    """Bundled candidate → BatchEntry.params_source='default' regardless of l1_results."""
+    """Bundled candidate → BatchEntry.params_source='default' regardless of l1_results.
+
+    Uses zone 14 (Litter Box, primary) and zone 15 (Loft, bundled) — both owned
+    by ethan-robot jobs so _job_for_zone resolves correctly without patching ACTIVE_JOBS.
+    """
     from dataclasses import dataclass, field
 
     @dataclass
     class TwoZoneJob(Ethan3FLitterBoxJob):
         job_id: str = "two_zone_test"
-        zones: list = field(default_factory=lambda: ["Litter Box", "Hallway"])
+        zones: list = field(default_factory=lambda: [_LITTER_BOX, _LOFT])
 
     job = TwoZoneJob()
     ctx = make_snapshot()
-    ctx.zone_scores = {"Litter Box": 75.0, "Hallway": 38.0}
+    ctx.zone_scores = {_LITTER_BOX: 75.0, _LOFT: 38.0}
 
-    # Litter Box independently passed; Hallway is below threshold but above bundle floor
+    # Litter Box independently passed; Loft is below threshold but above bundle floor
     zone_outcomes = [
         ZoneOutcome(
-            zone="Litter Box",
+            zone=_LITTER_BOX,
             action="dispatch",
             tier="R1",
             gate_failed="none",
@@ -126,7 +134,7 @@ def test_assemble_batch_bundled_uses_default():
             score=75.0,
         ),
         ZoneOutcome(
-            zone="Hallway",
+            zone=_LOFT,
             action="defer",
             tier="R0",
             gate_failed="r0",
@@ -135,23 +143,23 @@ def test_assemble_batch_bundled_uses_default():
         ),
     ]
 
-    # Even if an L1 result existed for Hallway, bundled zones always use defaults
+    # Even if an L1 result existed for Loft, bundled zones always use defaults
     l1_decision = L1Decision(
         decision="dispatch",
         confidence=0.9,
-        reason="clear hallway",
+        reason="clear loft",
         passes="double",
         intensity="high",
         params_reason="Should be ignored for bundled zone",
     )
-    l1_results = {(job.job_id, "Hallway"): l1_decision}
+    l1_results = {(job.job_id, _LOFT): l1_decision}
 
     batch = assemble_batch("ethan", zone_outcomes, ctx, [job], l1_results=l1_results)
 
-    hallway_entries = [e for e in batch if e.zone == "Hallway"]
-    assert len(hallway_entries) == 1
-    hallway = hallway_entries[0]
-    assert hallway.bundled is True
-    assert hallway.params_source == "default"
-    assert hallway.passes == job.cleaning_params.get("passes", "auto")
-    assert hallway.intensity == job.cleaning_params.get("intensity", "auto")
+    loft_entries = [e for e in batch if e.zone == _LOFT]
+    assert len(loft_entries) == 1
+    loft = loft_entries[0]
+    assert loft.bundled is True
+    assert loft.params_source == "default"
+    assert loft.passes == job.cleaning_params.get("passes", "auto")
+    assert loft.intensity == job.cleaning_params.get("intensity", "auto")
