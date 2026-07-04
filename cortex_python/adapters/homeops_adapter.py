@@ -20,21 +20,32 @@ import structlog
 from cortex_python.config.settings import Settings
 from cortex_python.modules.vacuumops.schemas import DecisionEntry, ZoneInfo, ZoneMeta
 
-# Room-key derivation helpers for ZoneInfo.room_key
-_ROOM_KEY_OVERRIDES: dict[str, str] = {
-    "Daniel's Room": "daniel_room",
+# Explicit zone-label → ctx.rooms key mapping for every known zone.
+# room_key=None means the zone has no parent room sensor (sub-zone);
+# zone_active_use_check and door_open_check treat these as always clear.
+# Add a new entry here whenever a zone is added to HomeOps or an HA sensor
+# is renamed — never rely on convention-based derivation.
+_ZONE_LABEL_TO_ROOM_KEY: dict[str, str | None] = {
+    # Ethan 3F
+    "Litter Box":  None,
+    "Loft":        "loft",
+    "Office":      "office",
+    "Gym":         "gym",
+    # Saros 1F
+    "Kitchen":      "kitchen",
+    "Bathroom":     "bathroom",
+    "Living Room":  "living_room",
+    "Hallway":      "hallway",
+    "Prep Area":    None,
     "Dining Table": "dining_room",
+    # Sam 2F
+    "Master Bathroom": "master_bath",
+    "Master Bedroom":  "master_bedroom",
+    "Upper Hallway":   "upper_hallway",
+    "Carlitos Room":   "carlitos_room",
+    "Kids Table Area": None,
+    "Daniel's Room":   "daniel_room",
 }
-_NO_ROOM_ZONES: frozenset[str] = frozenset({"Litter Box", "Prep Area", "Kids Table Area"})
-
-
-def _derive_room_key(label: str) -> str | None:
-    """Map a zone label to its snake_case ctx.rooms key, or None for sub-zones."""
-    if label in _NO_ROOM_ZONES:
-        return None
-    if label in _ROOM_KEY_OVERRIDES:
-        return _ROOM_KEY_OVERRIDES[label]
-    return label.lower().replace(" ", "_").replace("'", "")
 
 log = structlog.get_logger()
 
@@ -94,12 +105,15 @@ class HomeOpsAdapter:
                     zone_id = int(zone_id)
                     display = f"{floor} {label}".strip() if floor else label
                     scores[zone_id] = float(score) if score is not None else 0.0
+                    room_key = _ZONE_LABEL_TO_ROOM_KEY.get(label)
+                    if label not in _ZONE_LABEL_TO_ROOM_KEY:
+                        log.warning("zone_label_not_in_room_key_map", label=label, zone_id=zone_id)
                     zone_info[zone_id] = ZoneInfo(
                         label=label,
                         display=display,
                         unit_id=int(unit_id),
                         floor=floor,
-                        room_key=_derive_room_key(label),
+                        room_key=room_key,
                     )
 
             return scores, zone_info
