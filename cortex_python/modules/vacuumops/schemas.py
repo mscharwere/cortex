@@ -218,8 +218,8 @@ class DecisionEntry:
     timestamp: str  # ISO8601 PST
     robot: str  # "ethan" | "sam" — which robot this decision applies to
     zones: list[ZoneDecisionDetail]
-    # For SKIP: contains the single zone that was evaluated (or dominant deferring zone).
-    # For DISPATCH: contains all zones included in the mission.
+    # ALL zones evaluated for this robot in this tick, regardless of outcome.
+    # Each zone carries a `result` field: "dispatch" | "bundled" | "defer".
     tier_reached: str  # "R0" | "R1" | "L1" — highest tier any zone reached
     gate_failed: str | None
     # non-null on SKIP/DEFER: "r0" | "effectiveness" | "comfort"
