@@ -65,6 +65,8 @@ class RoomActivity:
     raw_occupancy: bool
     # binary_sensor.<room>_occupancy_status — instantaneous mmWave/Bayes occupancy.
     # Apply 90s grace period before treating False as "truly clear".
+    door_open: bool | None = None
+    # binary_sensor.{room}_door state. None = sensor unavailable → treat as open.
 
 
 @dataclass

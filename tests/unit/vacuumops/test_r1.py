@@ -81,7 +81,9 @@ def test_zone_active_use_fail_active_states(litter_box_job, activity):
 
 def test_zone_active_use_pass_missing_sensor(litter_box_job, clean_ctx):
     # Missing sensor → treat as clear (graceful degradation §4.2)
-    result, gate, reason = zone_active_use_check(litter_box_job, "litter_box_nonexistent", clean_ctx)
+    result, gate, reason = zone_active_use_check(
+        litter_box_job, "litter_box_nonexistent", clean_ctx
+    )
     assert result == "PASS"
     assert "unavailable" in reason
 
@@ -90,30 +92,44 @@ def test_zone_active_use_pass_missing_sensor(litter_box_job, clean_ctx):
 
 
 def test_floor_clearance_pass_all_clear(litter_box_job, clean_ctx):
-    result, gate, reason = floor_clearance_check(litter_box_job, "Litter Box", clean_ctx)
+    result, gate, reason = floor_clearance_check(
+        litter_box_job, "Litter Box", clean_ctx
+    )
     assert result == "PASS"
 
 
-def test_floor_clearance_fail_living_room(litter_box_job, clean_ctx):
+def test_floor_clearance_fail_living_room(clean_ctx):
+    """1F job: living_room occupied → FAIL."""
+    from cortex_python.modules.vacuumops.jobs import Saros1FLitterBoxJob
+
+    job = Saros1FLitterBoxJob()
     clean_ctx.rooms["living_room"] = make_room("active", raw_occupancy=True)
-    result, gate, reason = floor_clearance_check(litter_box_job, "Litter Box", clean_ctx)
+    result, gate, reason = floor_clearance_check(job, "Litter Box", clean_ctx)
     assert result == "FAIL"
     assert gate == "effectiveness"
     assert "living_room" in reason
 
 
-def test_floor_clearance_fail_kitchen(litter_box_job, clean_ctx):
+def test_floor_clearance_fail_kitchen(clean_ctx):
+    """1F job: kitchen occupied → FAIL."""
+    from cortex_python.modules.vacuumops.jobs import Saros1FLitterBoxJob
+
+    job = Saros1FLitterBoxJob()
     clean_ctx.rooms["kitchen"] = make_room("cooking", raw_occupancy=True)
-    result, gate, reason = floor_clearance_check(litter_box_job, "Litter Box", clean_ctx)
+    result, gate, reason = floor_clearance_check(job, "Litter Box", clean_ctx)
     assert result == "FAIL"
     assert "kitchen" in reason
 
 
-def test_floor_clearance_skips_missing_rooms(litter_box_job, clean_ctx):
+def test_floor_clearance_skips_missing_rooms(clean_ctx):
+    """Missing sensor rooms should not block floor clearance."""
+    from cortex_python.modules.vacuumops.jobs import Saros1FLitterBoxJob
+
+    job = Saros1FLitterBoxJob()
     # Remove some rooms — should not fail, just skip those rooms
     clean_ctx.rooms.pop("hallway", None)
     clean_ctx.rooms.pop("bathroom", None)
-    result, gate, reason = floor_clearance_check(litter_box_job, "Litter Box", clean_ctx)
+    result, gate, reason = floor_clearance_check(job, "Litter Box", clean_ctx)
     assert result == "PASS"
 
 
@@ -130,6 +146,7 @@ def test_transit_pattern_pass_no_patterns(litter_box_job, clean_ctx):
 def test_transit_pattern_fail_imminent(litter_box_job):
     """Weekday 7:05 AM UTC = before 7:10 PST bus — within look-ahead window."""
     import pytz
+
     pst = pytz.timezone("America/Los_Angeles")
     # 7:05 AM PST on a Tuesday
     ts = pst.localize(datetime(2026, 5, 26, 7, 5, 0)).astimezone(timezone.utc)
@@ -155,6 +172,7 @@ def test_transit_pattern_fail_imminent(litter_box_job):
 def test_transit_pattern_pass_outside_window(litter_box_job):
     """11 AM PST — well outside any bus pattern window."""
     import pytz
+
     pst = pytz.timezone("America/Los_Angeles")
     ts = pst.localize(datetime(2026, 5, 26, 11, 0, 0)).astimezone(timezone.utc)
     ctx = make_snapshot(timestamp=ts)
@@ -203,22 +221,27 @@ def test_noise_budget_check_strong_pass(litter_box_job, clean_ctx):
 def test_noise_budget_check_fail_piano(litter_box_job, clean_ctx):
     """Elena playing piano → budget near zero → FAIL."""
     from cortex_python.modules.vacuumops.schemas import PersonActivity
-    clean_ctx.people["elena"] = PersonActivity(activity="home_idle", confidence=0.9, piano=True)
+
+    clean_ctx.people["elena"] = PersonActivity(
+        activity="home_idle", confidence=0.9, piano=True
+    )
     result, gate, reason = noise_budget_check(litter_box_job, "Litter Box", clean_ctx)
     assert result == "FAIL"
     assert gate == "comfort"
     assert "piano" in reason
 
 
-def test_noise_budget_check_ambiguous_marginal(litter_box_job):
-    """Living room occupied + TV → marginal budget → AMBIGUOUS."""
+def test_noise_budget_check_ambiguous_marginal():
+    """Living room occupied on 1F job → marginal budget check — should not hard FAIL."""
+    from cortex_python.modules.vacuumops.jobs import Saros1FLitterBoxJob
+
+    job = Saros1FLitterBoxJob()
     ctx = make_snapshot()
     ctx.rooms["living_room"] = make_room("active", confidence=0.8, raw_occupancy=True)
     # noise_budget = 10 * 0.7 = 7.0 (living room occupied)
-    # noise_impact = 1.0 * (1 + 0.5 * 1) = 1.5 (one room occupied on floor)
-    # 1.5 ≤ 7.0 * 0.7 = 4.9 → PASS-strong
-    # Actually this might PASS — let's just verify it's not FAIL
-    result, gate, reason = noise_budget_check(litter_box_job, "Litter Box", ctx)
+    # noise_impact = 1.0 * (1 + 0.5 * 1) = 1.5 (one 1F room occupied)
+    # 1.5 ≤ 7.0 * 0.7 = 4.9 → PASS-strong — not a hard FAIL from living room alone
+    result, gate, reason = noise_budget_check(job, "Litter Box", ctx)
     assert result in ("PASS", "AMBIGUOUS")  # not a hard FAIL from living room alone
 
 
@@ -239,20 +262,23 @@ def test_noise_radius_check_pass_no_sleeping(litter_box_job, clean_ctx):
     assert result == "PASS"
 
 
-def test_noise_radius_check_fail_sleeping_room(litter_box_job, clean_ctx):
-    """Sleeping room on 1F floor → FAIL for floor-radius job."""
-    clean_ctx.rooms["hallway"] = make_room("sleeping", confidence=0.9, raw_occupancy=False)
-    result, gate, reason = noise_radius_check(litter_box_job, "Litter Box", clean_ctx)
+def test_noise_radius_check_fail_sleeping_room(clean_ctx):
+    """Sleeping room on 3F floor → FAIL for 3F floor-radius job."""
+    from cortex_python.modules.vacuumops.jobs import Ethan3FRoomsJob
+
+    job = Ethan3FRoomsJob()
+    clean_ctx.rooms["loft"] = make_room("sleeping", confidence=0.9, raw_occupancy=False)
+    result, gate, reason = noise_radius_check(job, "Loft", clean_ctx)
     assert result == "FAIL"
     assert gate == "comfort"
     assert "sleeping" in reason
 
 
-def test_noise_radius_check_pass_2f_sleeping_for_1f_job(litter_box_job, clean_ctx):
-    """2F sleeping room shouldn't affect a floor-radius 1F job."""
+def test_noise_radius_check_pass_2f_sleeping_for_3f_job(litter_box_job, clean_ctx):
+    """2F sleeping room shouldn't affect a floor-radius 3F job."""
     clean_ctx.rooms["master_bedroom"] = make_room("sleeping", confidence=0.9)
-    # master_bedroom is in 2F FLOOR_ROOM_MAP but LitterBoxJob.floor = "1F"
-    # floor-radius check only covers FLOOR_ROOM_MAP["1F"]
+    # master_bedroom is in 2F FLOOR_ROOM_MAP; Ethan3FLitterBoxJob.floor = "3F"
+    # floor-radius check only covers FLOOR_ROOM_MAP["3F"] — master_bedroom is out of scope
     result, gate, reason = noise_radius_check(litter_box_job, "Litter Box", clean_ctx)
     assert result == "PASS"
 
@@ -262,16 +288,22 @@ def test_noise_radius_check_pass_2f_sleeping_for_1f_job(litter_box_job, clean_ct
 
 @pytest.mark.asyncio
 async def test_run_r1_all_pass(litter_box_job, clean_ctx, mock_redis):
-    result, gate, reason = await run_r1(litter_box_job, "Litter Box", clean_ctx, mock_redis)
+    result, gate, reason = await run_r1(
+        litter_box_job, "Litter Box", clean_ctx, mock_redis
+    )
     assert result == "PASS"
     assert gate == "none"
 
 
 @pytest.mark.asyncio
-async def test_run_r1_robot_cooldown_short_circuits(litter_box_job, clean_ctx, mock_redis):
+async def test_run_r1_robot_cooldown_short_circuits(
+    litter_box_job, clean_ctx, mock_redis
+):
     mock_redis.exists = AsyncMock(return_value=1)  # robot cooldown active
     mock_redis.ttl = AsyncMock(return_value=3600)
-    result, gate, reason = await run_r1(litter_box_job, "Litter Box", clean_ctx, mock_redis)
+    result, gate, reason = await run_r1(
+        litter_box_job, "Litter Box", clean_ctx, mock_redis
+    )
     assert result == "FAIL"
     assert gate == "robot_cooldown"
 
@@ -288,8 +320,11 @@ async def test_run_r1_floor_not_clear_no_l1(litter_box_job, mock_redis):
 @pytest.mark.asyncio
 async def test_run_r1_piano_fails_comfort(litter_box_job, mock_redis):
     from cortex_python.modules.vacuumops.schemas import PersonActivity
+
     ctx = make_snapshot()
-    ctx.people["elena"] = PersonActivity(activity="home_idle", confidence=0.9, piano=True)
+    ctx.people["elena"] = PersonActivity(
+        activity="home_idle", confidence=0.9, piano=True
+    )
     result, gate, reason = await run_r1(litter_box_job, "Litter Box", ctx, mock_redis)
     assert result == "FAIL"
     assert gate == "comfort"
@@ -309,7 +344,9 @@ async def test_run_r1_ambiguous_when_effectiveness_pass_comfort_ambiguous(
         "cortex_python.modules.vacuumops.r1.noise_budget_check",
         return_value=("AMBIGUOUS", "comfort", "noise_marginal:impact=3.50:budget=4.00"),
     ):
-        result, gate, reason = await run_r1(litter_box_job, "Litter Box", ctx, mock_redis)
+        result, gate, reason = await run_r1(
+            litter_box_job, "Litter Box", ctx, mock_redis
+        )
 
     assert result == "AMBIGUOUS"
     assert gate == "comfort"
@@ -319,9 +356,12 @@ async def test_run_r1_ambiguous_when_effectiveness_pass_comfort_ambiguous(
 # ── room_key_for_zone ─────────────────────────────────────────────────────────
 
 
-def _make_zone_meta(occupancy_sensor: str | None = None, low_disruption: bool = False) -> ZoneMeta:
+def _make_zone_meta(
+    occupancy_sensor: str | None = None, low_disruption: bool = False
+) -> ZoneMeta:
     return ZoneMeta(
-        zone_id=1, unit_id=1,
+        zone_id=1,
+        unit_id=1,
         occupancy_sensor=occupancy_sensor,
         low_disruption=low_disruption,
     )
@@ -341,7 +381,9 @@ def test_room_key_for_zone_kitchen_sensor_group():
 
 def test_room_key_for_zone_explicit_map():
     """Bathroom tri-sensor handled by explicit _SENSOR_ENTITY_TO_ROOM map."""
-    meta = _make_zone_meta("binary_sensor.first_level_bathroom_tri_sensor_motion_detection")
+    meta = _make_zone_meta(
+        "binary_sensor.first_level_bathroom_tri_sensor_motion_detection"
+    )
     assert room_key_for_zone(meta) == "bathroom"
 
 
@@ -454,24 +496,34 @@ async def test_run_r1_full_bypass_ignores_kitchen_occupancy(litter_box_job, mock
     # Without bypass: kitchen occupancy would fail floor_clearance_check.
     # With bypass_mode="full": occupancy checks are skipped entirely.
     result, gate, reason = await run_r1(
-        litter_box_job, "Litter Box", ctx, mock_redis,
-        bypass_mode="full", bypass_reason_str="home_empty",
+        litter_box_job,
+        "Litter Box",
+        ctx,
+        mock_redis,
+        bypass_mode="full",
+        bypass_reason_str="home_empty",
     )
     assert result == "PASS"
     assert "occ_bypass:home_empty" in reason
 
 
 @pytest.mark.asyncio
-async def test_run_r1_room_scoped_hallway_clear_kitchen_occupied(litter_box_job, mock_redis):
+async def test_run_r1_room_scoped_hallway_clear_kitchen_occupied(
+    litter_box_job, mock_redis
+):
     """Override 2 (room_scoped): hallway clear, kitchen occupied → dispatch allowed."""
     meta = _make_zone_meta("binary_sensor.hallway_sensor_group", low_disruption=True)
     ctx = make_snapshot(home_count=1, who_home=["Carlos"])
     ctx.rooms["kitchen"] = make_room("cooking", raw_occupancy=True)
     ctx.rooms["hallway"] = make_room("idle", raw_occupancy=False)
     result, gate, reason = await run_r1(
-        litter_box_job, "Litter Box", ctx, mock_redis,
+        litter_box_job,
+        "Litter Box",
+        ctx,
+        mock_redis,
         zone_meta=meta,
-        bypass_mode="room_scoped", bypass_reason_str="single_person_low_disruption",
+        bypass_mode="room_scoped",
+        bypass_reason_str="single_person_low_disruption",
     )
     assert result == "PASS"
     assert "occ_bypass:single_person_low_disruption" in reason
@@ -484,9 +536,13 @@ async def test_run_r1_room_scoped_hallway_occupied_blocks(litter_box_job, mock_r
     ctx = make_snapshot(home_count=1, who_home=["Carlos"])
     ctx.rooms["hallway"] = make_room("active", raw_occupancy=True)
     result, gate, reason = await run_r1(
-        litter_box_job, "Litter Box", ctx, mock_redis,
+        litter_box_job,
+        "Litter Box",
+        ctx,
+        mock_redis,
         zone_meta=meta,
-        bypass_mode="room_scoped", bypass_reason_str="single_person_low_disruption",
+        bypass_mode="room_scoped",
+        bypass_reason_str="single_person_low_disruption",
     )
     assert result == "FAIL"
     assert gate == "effectiveness"
@@ -494,7 +550,9 @@ async def test_run_r1_room_scoped_hallway_occupied_blocks(litter_box_job, mock_r
 
 
 @pytest.mark.asyncio
-async def test_room_scoped_missing_room_graceful_degradation(litter_box_job, mock_redis):
+async def test_room_scoped_missing_room_graceful_degradation(
+    litter_box_job, mock_redis
+):
     """Override 2 (room_scoped): target_room resolves via room_key_for_zone but that
     room key is NOT present in ctx.rooms → zone is not blocked (PASS), no crash.
 
@@ -507,9 +565,13 @@ async def test_room_scoped_missing_room_graceful_degradation(litter_box_job, moc
     ctx = make_snapshot(home_count=1, who_home=["Carlos"])
     # ctx.rooms intentionally has no "hallway" entry — graceful degradation path
     result, gate, reason = await run_r1(
-        litter_box_job, "Litter Box", ctx, mock_redis,
+        litter_box_job,
+        "Litter Box",
+        ctx,
+        mock_redis,
         zone_meta=meta,
-        bypass_mode="room_scoped", bypass_reason_str="single_person_low_disruption",
+        bypass_mode="room_scoped",
+        bypass_reason_str="single_person_low_disruption",
     )
     assert result == "PASS"
     assert "occ_bypass:single_person_low_disruption" in reason

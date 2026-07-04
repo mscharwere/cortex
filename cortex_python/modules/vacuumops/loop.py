@@ -39,7 +39,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from cortex_python.adapters.litellm_client import build_litellm_client
 from cortex_python.config.settings import Settings
 from cortex_python.modules.vacuumops.config import VacuumOpsConfig
-from cortex_python.modules.vacuumops.jobs import LitterBoxJob, VacuumJob
+from cortex_python.modules.vacuumops.jobs import (
+    Ethan3FLitterBoxJob,
+    Ethan3FRoomsJob,
+    Sam2FJob,
+    Saros1FLitterBoxJob,
+    Saros1FRoomsJob,
+    VacuumJob,
+)
 from cortex_python.modules.vacuumops.l1 import L1Decision, resolve_params, resolve_zone_meta, run_l1
 from cortex_python.modules.vacuumops.r0 import _ZONE_COOLDOWN_KEY as _R0_ZONE_COOLDOWN_KEY
 from cortex_python.modules.vacuumops.r0 import run_r0
@@ -57,8 +64,13 @@ from cortex_python.modules.vacuumops.utils import parse_pattern_time as _parse_p
 
 log = structlog.get_logger()
 
-# Phase 1: exactly one active job
-ACTIVE_JOBS: list[VacuumJob] = [LitterBoxJob()]
+ACTIVE_JOBS: list[VacuumJob] = [
+    Ethan3FLitterBoxJob(),
+    Ethan3FRoomsJob(),
+    Saros1FLitterBoxJob(),
+    Saros1FRoomsJob(),
+    Sam2FJob(),
+]
 
 # ── Pattern loading ────────────────────────────────────────────────────────────
 
@@ -231,7 +243,11 @@ async def evaluate_zone(
     # R1 — two-gate rules
     try:
         r1_result, r1_gate_failed, r1_reason = await run_r1(
-            job, zone, ctx, redis_client, patterns,
+            job,
+            zone,
+            ctx,
+            redis_client,
+            patterns,
             zone_meta=zone_meta_for_bypass,
             bypass_mode=bypass_mode,
             bypass_reason_str=bypass_reason_str,
@@ -940,9 +956,7 @@ async def vacuumops_loop(settings: Settings) -> None:
                 # Dropped zones are logged to decision_log with event "containment_dedup".
                 # Phase 1: single zone, no containment relationships — this is a no-op
                 # but infrastructure is wired for Phase 2.
-                deduped_results, dropped_records = dedup_contained(
-                    zone_results, ctx.zone_metadata
-                )
+                deduped_results, dropped_records = dedup_contained(zone_results, ctx.zone_metadata)
                 for drop in dropped_records:
                     log.info(
                         "containment_dedup",
@@ -969,7 +983,10 @@ async def vacuumops_loop(settings: Settings) -> None:
             # Per-robot batch assembly + dispatch
             for robot, zone_outcomes in per_robot.items():
                 batch = assemble_batch(
-                    robot, zone_outcomes, ctx, ACTIVE_JOBS,
+                    robot,
+                    zone_outcomes,
+                    ctx,
+                    ACTIVE_JOBS,
                     l1_results=per_robot_l1.get(robot, {}),
                 )
 
@@ -1045,6 +1062,6 @@ async def vacuumops_loop(settings: Settings) -> None:
         await asyncio.sleep(interval)
 
 
-# Shim for r1.py circular import avoidance
+# Shim for circular import avoidance
 # r1.py imports _parse_pattern_time from loop.py
 __all__ = ["vacuumops_loop", "render_patterns_for", "_parse_pattern_time", "ACTIVE_JOBS"]

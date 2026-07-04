@@ -126,6 +126,23 @@ def floor_clearance_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tu
     return "PASS", "none", "floor_clear"
 
 
+def door_open_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[str, str, str]:
+    """R1-E4: Room door must be open if a door sensor is available.
+
+    Reads room.door_open from ContextSnapshot. The synth fetches
+    binary_sensor.{room_key}_door and sets door_open on RoomActivity.
+    If door_open is None (sensor unavailable), treat as open — graceful
+    degradation. Only runs when job.door_check is True.
+    """
+    room_key = zone.lower().replace(" ", "_").replace("'", "")
+    room = ctx.rooms.get(room_key)
+    if room is None or room.door_open is None:
+        return "PASS", "none", f"door_sensor_unavailable_treat_open:{zone}"
+    if not room.door_open:
+        return "FAIL", "effectiveness", f"door_closed:{zone}"
+    return "PASS", "none", f"door_open:{zone}"
+
+
 def transit_pattern_lookahead(
     job: VacuumJob,
     zone: str,
@@ -339,6 +356,7 @@ async def run_r1(
            "none"        → run zone_active_use_check + floor_clearance_check normally
            "full"        → skip both (house empty; no one to disturb)
            "room_scoped" → skip floor_clearance_check; check ONLY the zone's parent room
+      3b. Door check (R1-E4) — runs when job.door_check=True, after occupancy gates.
       4. Transit lookahead — ALWAYS runs (not an occupancy gate)
       5. Comfort rules (AMBIGUOUS / PASS-marginal → L1 if job.l1_required or AMBIGUOUS)
          — ALWAYS runs (not an occupancy gate)
@@ -388,11 +406,26 @@ async def run_r1(
         # floor_clearance_check which skips unavailable rooms rather than blocking).
 
     else:
-        # mode == "none" — normal floor-level occupancy gates
-        for eff_fn in (zone_active_use_check, floor_clearance_check):
-            result, gate_failed, reason = eff_fn(job, zone, ctx)
+        # mode == "none" — occupancy gates per job.effectiveness_scope
+        if job.effectiveness_scope == "floor":
+            for eff_fn in (zone_active_use_check, floor_clearance_check):
+                result, gate_failed, reason = eff_fn(job, zone, ctx)
+                if result == "FAIL":
+                    return result, gate_failed, reason
+        elif job.effectiveness_scope == "room_only":
+            # Per-room model (Sam 2F): only check the zone's own room occupancy,
+            # not the whole floor. floor_clearance_check is skipped.
+            result, gate_failed, reason = zone_active_use_check(job, zone, ctx)
             if result == "FAIL":
                 return result, gate_failed, reason
+        # effectiveness_scope == "none": skip both occupancy checks entirely.
+        # Used for Ethan 3F Litter Box — dispatches regardless of 3F occupancy.
+
+    # Door check — R1-E4 (Sam 2F only; job.door_check=False for all others)
+    if job.door_check:
+        result, gate_failed, reason = door_open_check(job, zone, ctx)
+        if result == "FAIL":
+            return result, gate_failed, reason
 
     # Transit lookahead — ALWAYS runs regardless of occupancy bypass (not an occupancy gate)
     result, gate_failed, reason = transit_pattern_lookahead(job, zone, ctx, patterns)

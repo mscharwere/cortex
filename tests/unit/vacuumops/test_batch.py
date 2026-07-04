@@ -8,15 +8,16 @@ Tests D10 + D11 logic:
 
 from __future__ import annotations
 
-import pytest
 
-from cortex_python.modules.vacuumops.jobs import LitterBoxJob, VacuumJob
+from cortex_python.modules.vacuumops.jobs import VacuumJob
 from cortex_python.modules.vacuumops.loop import assemble_batch
 from cortex_python.modules.vacuumops.schemas import ZoneOutcome
 from tests.unit.vacuumops.conftest import make_snapshot
 
 
-def make_dispatch_outcome(zone: str, score: float = 75.0, tier: str = "R1") -> ZoneOutcome:
+def make_dispatch_outcome(
+    zone: str, score: float = 75.0, tier: str = "R1"
+) -> ZoneOutcome:
     return ZoneOutcome(
         zone=zone,
         action="dispatch",
@@ -119,7 +120,9 @@ def test_assemble_batch_bundle_threshold_included():
         noise_radius: str = "floor"
         dispatch_threshold: float = 50.0
         bundle_threshold_pct: float = 0.70
-        cleaning_params: dict = field(default_factory=lambda: {"passes": "auto", "intensity": "auto"})
+        cleaning_params: dict = field(
+            default_factory=lambda: {"passes": "auto", "intensity": "auto"}
+        )
 
     job = TwoZoneJob()
     # Litter Box independently passes; Hallway is at bundle floor (50 * 0.7 = 35)
@@ -128,7 +131,9 @@ def test_assemble_batch_bundle_threshold_included():
 
     zone_outcomes = [
         make_dispatch_outcome("Litter Box", score=75.0),
-        make_defer_outcome("Hallway", score=38.0, gate_failed="r0", reason="score_below_threshold"),
+        make_defer_outcome(
+            "Hallway", score=38.0, gate_failed="r0", reason="score_below_threshold"
+        ),
     ]
 
     batch = assemble_batch("ethan", zone_outcomes, ctx, [job])
@@ -158,7 +163,9 @@ def test_assemble_batch_bundle_below_floor_not_included():
         noise_radius: str = "floor"
         dispatch_threshold: float = 50.0
         bundle_threshold_pct: float = 0.70
-        cleaning_params: dict = field(default_factory=lambda: {"passes": "auto", "intensity": "auto"})
+        cleaning_params: dict = field(
+            default_factory=lambda: {"passes": "auto", "intensity": "auto"}
+        )
 
     job = TwoZoneJob()
     ctx = make_snapshot()
@@ -167,7 +174,9 @@ def test_assemble_batch_bundle_below_floor_not_included():
 
     zone_outcomes = [
         make_dispatch_outcome("Litter Box", score=75.0),
-        make_defer_outcome("Hallway", score=20.0, gate_failed="r0", reason="score_below_threshold"),
+        make_defer_outcome(
+            "Hallway", score=20.0, gate_failed="r0", reason="score_below_threshold"
+        ),
     ]
 
     batch = assemble_batch("ethan", zone_outcomes, ctx, [job])
@@ -190,7 +199,9 @@ def test_assemble_batch_hard_failed_zone_not_bundled():
         noise_radius: str = "floor"
         dispatch_threshold: float = 50.0
         bundle_threshold_pct: float = 0.70
-        cleaning_params: dict = field(default_factory=lambda: {"passes": "auto", "intensity": "auto"})
+        cleaning_params: dict = field(
+            default_factory=lambda: {"passes": "auto", "intensity": "auto"}
+        )
 
     job = TwoZoneJob()
     ctx = make_snapshot()
@@ -199,7 +210,10 @@ def test_assemble_batch_hard_failed_zone_not_bundled():
     zone_outcomes = [
         make_dispatch_outcome("Litter Box", score=75.0),
         make_defer_outcome(
-            "Hallway", score=40.0, gate_failed="effectiveness", reason="zone_occupied:Hallway"
+            "Hallway",
+            score=40.0,
+            gate_failed="effectiveness",
+            reason="zone_occupied:Hallway",
         ),
     ]
 

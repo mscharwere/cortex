@@ -17,7 +17,7 @@ from cortex_python.modules.vacuumops.r0 import (
     run_r0,
     score_above_threshold,
 )
-from tests.unit.vacuumops.conftest import make_robot_state, make_snapshot
+from tests.unit.vacuumops.conftest import make_snapshot
 
 
 # ── robot_docked ──────────────────────────────────────────────────────────────
@@ -129,7 +129,9 @@ def test_not_in_active_mission_fail_states(litter_box_job, state):
 @pytest.mark.asyncio
 async def test_not_in_zone_cooldown_pass(litter_box_job, clean_ctx, mock_redis):
     mock_redis.exists = AsyncMock(return_value=0)
-    passed, reason = await not_in_zone_cooldown(litter_box_job, "Litter Box", clean_ctx, mock_redis)
+    passed, reason = await not_in_zone_cooldown(
+        litter_box_job, "Litter Box", clean_ctx, mock_redis
+    )
     assert passed is True
 
 
@@ -137,7 +139,9 @@ async def test_not_in_zone_cooldown_pass(litter_box_job, clean_ctx, mock_redis):
 async def test_not_in_zone_cooldown_fail_active(litter_box_job, clean_ctx, mock_redis):
     mock_redis.exists = AsyncMock(return_value=1)
     mock_redis.ttl = AsyncMock(return_value=14400)
-    passed, reason = await not_in_zone_cooldown(litter_box_job, "Litter Box", clean_ctx, mock_redis)
+    passed, reason = await not_in_zone_cooldown(
+        litter_box_job, "Litter Box", clean_ctx, mock_redis
+    )
     assert passed is False
     assert "cooldown_active" in reason
     assert "14400" in reason

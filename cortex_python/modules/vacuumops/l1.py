@@ -63,7 +63,7 @@ class L1Decision(BaseModel):
     params_reason: str | None = None  # ≤120 chars
 
 
-def resolve_zone_meta(zone_label: str, ctx: "ContextSnapshot") -> "ZoneMeta":
+def resolve_zone_meta(zone_label: str, ctx: ContextSnapshot) -> ZoneMeta:
     """Resolve ZoneMeta for a zone. Phase 1: single-zone, returns first entry.
     Phase 2: match by label field once ZoneMeta.label is added."""
     if not ctx.zone_metadata:
@@ -73,7 +73,7 @@ def resolve_zone_meta(zone_label: str, ctx: "ContextSnapshot") -> "ZoneMeta":
     return next(iter(ctx.zone_metadata.values()))
 
 
-def resolve_params(job: VacuumJob, l1: "L1Decision | None") -> tuple[str, str, str]:
+def resolve_params(job: VacuumJob, l1: L1Decision | None) -> tuple[str, str, str]:
     """Resolve passes + intensity from L1 result, falling back to job defaults.
 
     Returns (passes, intensity, source) where source is "l1" | "mixed" | "default".
@@ -307,7 +307,9 @@ async def run_l1(
     """
     # Check Redis cache first
     context_hash = _build_context_hash(
-        job, zone, ctx,
+        job,
+        zone,
+        ctx,
         bypassed_for_zone=bypassed_for_zone,
         reason_for_zone=reason_for_zone,
     )
@@ -325,7 +327,12 @@ async def run_l1(
     # Render prompt
     try:
         prompt = _render_prompt(
-            job, zone, ctx, marginal_result, prompt_template, patterns_block,
+            job,
+            zone,
+            ctx,
+            marginal_result,
+            prompt_template,
+            patterns_block,
             bypassed_for_zone=bypassed_for_zone,
             reason_for_zone=reason_for_zone,
         )

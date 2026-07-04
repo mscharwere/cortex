@@ -46,25 +46,36 @@ log = structlog.get_logger()
 # People tracked by CORTEX
 _PEOPLE = ["carlos", "elena", "carlitos", "daniel", "iestaf"]
 
-# Rooms tracked in Phase 1 (Phase 2 adds more)
+# Rooms tracked — mirrors FLOOR_ROOM_MAP in noise.py
 _TRACKED_ROOMS = [
+    # 1F (Saros 10R)
     "kitchen",
     "living_room",
-    "master_bedroom",
-    "carlos_room",
-    # 1F full set from FLOOR_ROOM_MAP
     "hallway",
     "dining_room",
     "prep_area",
     "bathroom",
-    # 2F
+    # 2F (Sam j7+)
+    "master_bedroom",
     "master_bathroom",
-    "upper_hall",
+    "upper_hallway",
+    "carlitos_room",
+    "daniel_room",
     "kids_table_area",
-    # 3F
+    # 3F (Ethan j9+)
+    "loft",
     "office",
+    "gym",
     "family_room",
 ]
+
+# Entity ID overrides for robots whose HA entity doesn't follow vacuum.{robot} convention.
+_ROBOT_ENTITY_MAP: dict[str, dict[str, str]] = {
+    "saros": {
+        "vacuum": "vacuum.saros_10r",
+        "battery": "sensor.saros_10r_battery",
+    },
+}
 
 # Quiet-hours windows (PST — compared after converting ctx.timestamp to PST)
 _QUIET_HOURS_1F_START = 22  # 10 PM
@@ -149,16 +160,26 @@ async def _fetch_room_activity(ha_adapter: HARestAdapter, room: str) -> RoomActi
         detected = "active" if raw_occupancy else "idle"
         confidence = 0.5
 
+    # Door sensor — binary_sensor.{room}_door (None if unavailable)
+    door_open: bool | None = None
+    door_state = await ha_adapter.get_entity_state(f"binary_sensor.{room}_door")
+    if door_state is not None and door_state.get("state") not in ("unavailable", "unknown", None):
+        door_open = door_state.get("state", "off").lower() in ("on", "true", "open")
+
     return RoomActivity(
         detected=detected,
         confidence=confidence,
         raw_occupancy=raw_occupancy,
+        door_open=door_open,
     )
 
 
 async def _fetch_robot_state(ha_adapter: HARestAdapter, robot: str) -> RobotState:
     """Fetch RobotState for one robot from HA REST."""
-    entity_id = f"vacuum.{robot}"
+    robot_cfg = _ROBOT_ENTITY_MAP.get(robot, {})
+    entity_id = robot_cfg.get("vacuum", f"vacuum.{robot}")
+    battery_entity_id = robot_cfg.get("battery", f"sensor.{robot}_battery")
+
     state = await ha_adapter.get_entity_state(entity_id)
     if state is None:
         # Robot unavailable — safe default (not docked, low battery)
@@ -171,7 +192,6 @@ async def _fetch_robot_state(ha_adapter: HARestAdapter, robot: str) -> RobotStat
     # The Roomba HA integration does NOT expose battery_level on the vacuum entity
     # top-level attributes — it is buried in raw_state.batPct.  The dedicated
     # sensor.{robot}_battery entity is the canonical surface.
-    battery_entity_id = f"sensor.{robot}_battery"
     battery_state = await ha_adapter.get_entity_state(battery_entity_id)
     if battery_state is not None:
         battery_pct = _safe_int(battery_state.get("state", 0))
@@ -307,7 +327,7 @@ async def build_snapshot(
     else:
         home_count = -1
         who_home = []
-    home_empty = (home_count == 0)
+    home_empty = home_count == 0
 
     # ── People ────────────────────────────────────────────────────────────────
     people: dict[str, PersonActivity] = {}
@@ -332,7 +352,7 @@ async def build_snapshot(
 
     # ── Robots ────────────────────────────────────────────────────────────────
     robot_states: dict[str, RobotState] = {}
-    for robot in ("ethan", "sam"):
+    for robot in ("ethan", "sam", "saros"):
         try:
             robot_states[robot] = await _fetch_robot_state(ha_adapter, robot)
         except Exception as exc:

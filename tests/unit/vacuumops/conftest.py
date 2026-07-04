@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from cortex_python.modules.vacuumops.jobs import LitterBoxJob
+from cortex_python.modules.vacuumops.jobs import Ethan3FLitterBoxJob
 from cortex_python.modules.vacuumops.schemas import (
-    CalendarEvent,
     ContextSnapshot,
     PersonActivity,
     RobotState,
@@ -44,7 +43,9 @@ def make_room(
     confidence: float = 0.8,
     raw_occupancy: bool = False,
 ) -> RoomActivity:
-    return RoomActivity(detected=detected, confidence=confidence, raw_occupancy=raw_occupancy)
+    return RoomActivity(
+        detected=detected, confidence=confidence, raw_occupancy=raw_occupancy
+    )
 
 
 def make_snapshot(
@@ -109,8 +110,8 @@ def make_snapshot(
 
 
 @pytest.fixture
-def litter_box_job() -> LitterBoxJob:
-    return LitterBoxJob()
+def litter_box_job() -> Ethan3FLitterBoxJob:
+    return Ethan3FLitterBoxJob()
 
 
 @pytest.fixture
