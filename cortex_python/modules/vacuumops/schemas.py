@@ -198,7 +198,7 @@ class ZoneDecisionDetail:
     # per-zone L1 confidence if L1 was reached; None for R0/R1 deferrals and
     # for bundled zones (D11)
     display: str = ""                       # floor-prefixed label, e.g. "3F Litter Box"
-    result: str = ""                        # "dispatch" | "bundled" | "defer"
+    result: str | None = None               # "dispatch" | "bundled" | "defer" | None (unset)
     gate_failed: str | None = None          # non-null when result=="defer"
     gate_reason: str | None = None          # zo.reason when result=="defer"
     # L1 details — only populated when this zone reached L1

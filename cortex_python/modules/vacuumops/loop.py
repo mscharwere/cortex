@@ -423,6 +423,10 @@ def _job_for_zone(zone_id: int) -> VacuumJob:
     for job in ACTIVE_JOBS:
         if zone_id in job.zones:
             return job
+    logger.warning(
+        "_job_for_zone: zone_id=%s not found in any active job — falling back to ACTIVE_JOBS[0]",
+        zone_id,
+    )
     return ACTIVE_JOBS[0]
 
 
@@ -741,8 +745,8 @@ async def persist_decision(
                 l1_decision=l1.decision if l1 else None,
                 l1_reason=l1.reason if l1 else None,
                 l1_defer_until_hint=l1.defer_until_hint if l1 else None,
-                l1_passes=str(l1.passes) if (l1 and l1.passes) else None,
-                l1_intensity=str(l1.intensity) if (l1 and l1.intensity) else None,
+                l1_passes=str(l1.passes) if (l1 and l1.passes is not None) else None,
+                l1_intensity=str(l1.intensity) if (l1 and l1.intensity is not None) else None,
                 l1_params_reason=l1.params_reason if l1 else None,
             )
         )
