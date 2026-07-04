@@ -311,6 +311,10 @@ async def evaluate_zone(
             score=score,
         )
 
+    # Record L1 decision for all outcomes — persist_decision uses this for zone details
+    if l1_results is not None:
+        l1_results[(job.job_id, zone_id)] = l1_decision
+
     # Low-confidence check (Phase 1: no AIT overflow queue — just defer and log)
     if l1_decision.confidence < vacuumops_cfg.l1_overflow_confidence:
         log.info(
@@ -340,10 +344,6 @@ async def evaluate_zone(
             score=score,
             l1_confidence=l1_decision.confidence,
         )
-
-    # Populate l1_results so assemble_batch can resolve cleaning params
-    if l1_results is not None:
-        l1_results[(job.job_id, zone_id)] = l1_decision
 
     return ZoneOutcome(
         zone=zone_id,
@@ -423,10 +423,7 @@ def _job_for_zone(zone_id: int) -> VacuumJob:
     for job in ACTIVE_JOBS:
         if zone_id in job.zones:
             return job
-    logger.warning(
-        "_job_for_zone: zone_id=%s not found in any active job — falling back to ACTIVE_JOBS[0]",
-        zone_id,
-    )
+    log.warning("_job_for_zone_fallback", zone_id=zone_id)
     return ACTIVE_JOBS[0]
 
 
