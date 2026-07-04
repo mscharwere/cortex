@@ -216,9 +216,19 @@ class HomeOpsAdapter:
             "zones": [
                 {
                     "label": z.label,
+                    "display": z.display,
                     "score": z.score,
                     "bundled": z.bundled,
                     "l1_confidence": z.l1_confidence,
+                    "result": z.result,
+                    "gate_failed": z.gate_failed,
+                    "gate_reason": z.gate_reason,
+                    "l1_decision": z.l1_decision,
+                    "l1_reason": z.l1_reason,
+                    "l1_defer_until_hint": z.l1_defer_until_hint,
+                    "l1_passes": z.l1_passes,
+                    "l1_intensity": z.l1_intensity,
+                    "l1_params_reason": z.l1_params_reason,
                 }
                 for z in entry.zones
             ],

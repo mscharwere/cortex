@@ -197,16 +197,16 @@ class ZoneDecisionDetail:
     l1_confidence: float | None = None
     # per-zone L1 confidence if L1 was reached; None for R0/R1 deferrals and
     # for bundled zones (D11)
-    display: str = ""                       # floor-prefixed label, e.g. "3F Litter Box"
-    result: str | None = None               # "dispatch" | "bundled" | "defer" | None (unset)
-    gate_failed: str | None = None          # non-null when result=="defer"
-    gate_reason: str | None = None          # zo.reason when result=="defer"
+    display: str = ""  # floor-prefixed label, e.g. "3F Litter Box"
+    result: str | None = None  # "dispatch" | "bundled" | "defer" | None (unset)
+    gate_failed: str | None = None  # non-null when result=="defer"
+    gate_reason: str | None = None  # zo.reason when result=="defer"
     # L1 details — only populated when this zone reached L1
-    l1_decision: str | None = None          # "dispatch" | "defer"
+    l1_decision: str | None = None  # "dispatch" | "defer"
     l1_reason: str | None = None
     l1_defer_until_hint: str | None = None
-    l1_passes: str | None = None            # "auto" | "single" | "double"
-    l1_intensity: str | None = None         # "auto" | "normal" | "high"
+    l1_passes: str | None = None  # "auto" | "single" | "double"
+    l1_intensity: str | None = None  # "auto" | "normal" | "high"
     l1_params_reason: str | None = None
 
 
