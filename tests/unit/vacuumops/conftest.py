@@ -13,6 +13,7 @@ from cortex_python.modules.vacuumops.schemas import (
     PersonActivity,
     RobotState,
     RoomActivity,
+    ZoneInfo,
 )
 
 
@@ -93,7 +94,16 @@ def make_snapshot(
         home={"mode": "home"},
         people=people if people is not None else default_people,
         rooms=rooms if rooms is not None else default_rooms,
-        zone_scores={"Litter Box": litter_box_score},
+        zone_scores={14: litter_box_score},
+        zone_info={
+            14: ZoneInfo(
+                label="Litter Box",
+                display="3F Litter Box",
+                unit_id=2,
+                floor="3F",
+                room_key=None,
+            )
+        },
         upcoming_events=upcoming_events or [],
         robot_states={
             "ethan": make_robot_state(robot_state, battery),

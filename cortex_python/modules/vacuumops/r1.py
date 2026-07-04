@@ -59,7 +59,7 @@ _SENSOR_ENTITY_TO_ROOM: dict[str, str] = {
 
 
 async def per_robot_cooldown_check(
-    job: VacuumJob, zone: str, ctx: ContextSnapshot, redis_client: aioredis.Redis
+    job: VacuumJob, zone_id: int, ctx: ContextSnapshot, redis_client: aioredis.Redis
 ) -> tuple[str, str, str]:
     """D12: Per-robot cooldown must not be active.
 
@@ -81,7 +81,7 @@ async def per_robot_cooldown_check(
 # ── Effectiveness rules ───────────────────────────────────────────────────────
 
 
-def zone_active_use_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[str, str, str]:
+def zone_active_use_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tuple[str, str, str]:
     """R1-E1: Zone must not be actively occupied or in active use.
 
     Checks:
@@ -90,22 +90,28 @@ def zone_active_use_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tu
     - detected_activity NOT IN {active, cooking, eating, transit}
 
     Returns FAIL with reason if zone is occupied or in active use.
+    Sub-zones (room_key=None, e.g. Litter Box) have no room sensor — treat as clear.
     """
-    room = ctx.rooms.get(zone.lower().replace(" ", "_"))
+    zone_info = ctx.zone_info.get(zone_id)
+    room_key = zone_info.room_key if zone_info else None
+    if room_key is None:
+        # No parent room sensor (sub-zone or sensor unavailable) — graceful degradation §8.5
+        return "PASS", "none", "zone_sensor_unavailable_treat_clear"
+
+    room = ctx.rooms.get(room_key)
     if room is None:
-        # Sensor unavailable — treat zone as clear (graceful degradation §8.5)
         return "PASS", "none", "zone_sensor_unavailable_treat_clear"
 
     if room.raw_occupancy:
-        return "FAIL", "effectiveness", f"zone_occupied:{zone}"
+        return "FAIL", "effectiveness", f"zone_occupied:{zone_id}"
 
     if room.detected in _ACTIVE_ROOM_STATES:
-        return "FAIL", "effectiveness", f"zone_active_use:{zone}:activity={room.detected}"
+        return "FAIL", "effectiveness", f"zone_active_use:{zone_id}:activity={room.detected}"
 
     return "PASS", "none", "zone_clear"
 
 
-def floor_clearance_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[str, str, str]:
+def floor_clearance_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tuple[str, str, str]:
     """R1-E2: Operating floor must be clear (no raw_occupancy across floor rooms).
 
     Checks every room in FLOOR_ROOM_MAP[job.floor]. The target zone's own
@@ -126,7 +132,7 @@ def floor_clearance_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tu
     return "PASS", "none", "floor_clear"
 
 
-def door_open_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[str, str, str]:
+def door_open_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tuple[str, str, str]:
     """R1-E4: Room door must be open if a door sensor is available.
 
     Reads room.door_open from ContextSnapshot. The synth fetches
@@ -134,18 +140,21 @@ def door_open_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[st
     If door_open is None (sensor unavailable), treat as open — graceful
     degradation. Only runs when job.door_check is True.
     """
-    room_key = zone.lower().replace(" ", "_").replace("'", "")
+    zone_info = ctx.zone_info.get(zone_id)
+    room_key = zone_info.room_key if zone_info else None
+    if room_key is None:
+        return "PASS", "none", f"door_sensor_unavailable_treat_open:{zone_id}"
     room = ctx.rooms.get(room_key)
     if room is None or room.door_open is None:
-        return "PASS", "none", f"door_sensor_unavailable_treat_open:{zone}"
+        return "PASS", "none", f"door_sensor_unavailable_treat_open:{zone_id}"
     if not room.door_open:
-        return "FAIL", "effectiveness", f"door_closed:{zone}"
-    return "PASS", "none", f"door_open:{zone}"
+        return "FAIL", "effectiveness", f"door_closed:{zone_id}"
+    return "PASS", "none", f"door_open:{zone_id}"
 
 
 def transit_pattern_lookahead(
     job: VacuumJob,
-    zone: str,
+    zone_id: int,
     ctx: ContextSnapshot,
     patterns: list[dict],
 ) -> tuple[str, str, str]:
@@ -203,7 +212,7 @@ def transit_pattern_lookahead(
 # ── Comfort rules ─────────────────────────────────────────────────────────────
 
 
-def noise_budget_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[str, str, str]:
+def noise_budget_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tuple[str, str, str]:
     """R1-C1: noise_impact must not exceed noise_budget.
 
     Result:
@@ -231,7 +240,7 @@ def noise_budget_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple
     return "FAIL", "comfort", reason
 
 
-def noise_radius_check(job: VacuumJob, zone: str, ctx: ContextSnapshot) -> tuple[str, str, str]:
+def noise_radius_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tuple[str, str, str]:
     """R1-C2: noise_radius must not overlap noise-sensitive zones.
 
     Noise-sensitive = a sleeping person's room or an active piano room.
@@ -295,7 +304,7 @@ def room_key_for_zone(zone_meta: ZoneMeta | None) -> str | None:
 
 
 def occupancy_gate_bypass(
-    zone: str,
+    zone_id: int,
     ctx: ContextSnapshot,
     zone_meta: ZoneMeta | None,
 ) -> tuple[str, str | None]:
@@ -338,7 +347,7 @@ def occupancy_gate_bypass(
 
 async def run_r1(
     job: VacuumJob,
-    zone: str,
+    zone_id: int,
     ctx: ContextSnapshot,
     redis_client: aioredis.Redis,
     patterns: list[dict] | None = None,
@@ -370,7 +379,7 @@ async def run_r1(
         patterns = []
 
     # D12: per-robot cooldown gate first
-    result, gate_failed, reason = await per_robot_cooldown_check(job, zone, ctx, redis_client)
+    result, gate_failed, reason = await per_robot_cooldown_check(job, zone_id, ctx, redis_client)
     if result == "FAIL":
         return result, gate_failed, reason
 
@@ -409,13 +418,13 @@ async def run_r1(
         # mode == "none" — occupancy gates per job.effectiveness_scope
         if job.effectiveness_scope == "floor":
             for eff_fn in (zone_active_use_check, floor_clearance_check):
-                result, gate_failed, reason = eff_fn(job, zone, ctx)
+                result, gate_failed, reason = eff_fn(job, zone_id, ctx)
                 if result == "FAIL":
                     return result, gate_failed, reason
         elif job.effectiveness_scope == "room_only":
             # Per-room model (Sam 2F): only check the zone's own room occupancy,
             # not the whole floor. floor_clearance_check is skipped.
-            result, gate_failed, reason = zone_active_use_check(job, zone, ctx)
+            result, gate_failed, reason = zone_active_use_check(job, zone_id, ctx)
             if result == "FAIL":
                 return result, gate_failed, reason
         # effectiveness_scope == "none": skip both occupancy checks entirely.
@@ -423,18 +432,18 @@ async def run_r1(
 
     # Door check — R1-E4 (Sam 2F only; job.door_check=False for all others)
     if job.door_check:
-        result, gate_failed, reason = door_open_check(job, zone, ctx)
+        result, gate_failed, reason = door_open_check(job, zone_id, ctx)
         if result == "FAIL":
             return result, gate_failed, reason
 
     # Transit lookahead — ALWAYS runs regardless of occupancy bypass (not an occupancy gate)
-    result, gate_failed, reason = transit_pattern_lookahead(job, zone, ctx, patterns)
+    result, gate_failed, reason = transit_pattern_lookahead(job, zone_id, ctx, patterns)
     if result == "FAIL":
         return result, gate_failed, reason
 
     # Comfort rules — ALWAYS run (noise/sleep radius not affected by occupancy bypass)
-    nb_result, nb_gate, nb_reason = noise_budget_check(job, zone, ctx)
-    nr_result, nr_gate, nr_reason = noise_radius_check(job, zone, ctx)
+    nb_result, nb_gate, nb_reason = noise_budget_check(job, zone_id, ctx)
+    nr_result, nr_gate, nr_reason = noise_radius_check(job, zone_id, ctx)
 
     # Any hard comfort FAIL → defer
     if nb_result == "FAIL":

@@ -18,7 +18,23 @@ import httpx
 import structlog
 
 from cortex_python.config.settings import Settings
-from cortex_python.modules.vacuumops.schemas import DecisionEntry, ZoneMeta
+from cortex_python.modules.vacuumops.schemas import DecisionEntry, ZoneInfo, ZoneMeta
+
+# Room-key derivation helpers for ZoneInfo.room_key
+_ROOM_KEY_OVERRIDES: dict[str, str] = {
+    "Daniel's Room": "daniel_room",
+    "Dining Table": "dining_room",
+}
+_NO_ROOM_ZONES: frozenset[str] = frozenset({"Litter Box", "Prep Area", "Kids Table Area"})
+
+
+def _derive_room_key(label: str) -> str | None:
+    """Map a zone label to its snake_case ctx.rooms key, or None for sub-zones."""
+    if label in _NO_ROOM_ZONES:
+        return None
+    if label in _ROOM_KEY_OVERRIDES:
+        return _ROOM_KEY_OVERRIDES[label]
+    return label.lower().replace(" ", "_").replace("'", "")
 
 log = structlog.get_logger()
 
@@ -45,30 +61,48 @@ class HomeOpsAdapter:
             follow_redirects=True,
         )
 
-    async def get_zone_scores(self) -> dict[str, float]:
-        """Fetch current zone dirtiness scores from HomeOps.
+    async def get_zone_data(self) -> tuple[dict[int, float], dict[int, ZoneInfo]]:
+        """Fetch zone dirtiness scores and display metadata from HomeOps.
 
         GET /api/vacuum/units
-        Parses response: data[].zones[].{label, score}
-        Returns a flat dict: {"Litter Box": 78.3, "Hallway": 41.0, ...}
+        Parses response: data[].{id, floor, zones[].{id, label, score}}
+        Returns:
+          scores:    dict[zone_id → score]
+          zone_info: dict[zone_id → ZoneInfo]
 
-        Returns {} on failure (caller should skip tick if scores unavailable).
-        Raises on error so the caller (synth) can handle the skip-tick path
-        per §8.5.
+        Raises on error so the caller (synth) can handle the skip-tick path per §8.5.
         """
         async with self._client() as client:
             r = await client.get("/api/vacuum/units")
             r.raise_for_status()
             data = r.json()
 
-            scores: dict[str, float] = {}
-            for unit in data.get("data", []):
-                for zone in unit.get("zones", []):
-                    label = zone.get("label")
-                    score = zone.get("score")
-                    if label is not None and score is not None:
-                        scores[label] = float(score)
-            return scores
+        scores: dict[int, float] = {}
+        zone_info: dict[int, ZoneInfo] = {}
+
+        for unit in data.get("data", []):
+            unit_id = unit.get("id")
+            floor = unit.get("floor", "")
+            if unit_id is None:
+                continue
+            for zone in unit.get("zones", []):
+                zone_id = zone.get("id")
+                label = zone.get("label")
+                score = zone.get("score")
+                if zone_id is None or label is None:
+                    continue
+                zone_id = int(zone_id)
+                display = f"{floor} {label}".strip() if floor else label
+                scores[zone_id] = float(score) if score is not None else 0.0
+                zone_info[zone_id] = ZoneInfo(
+                    label=label,
+                    display=display,
+                    unit_id=int(unit_id),
+                    floor=floor,
+                    room_key=_derive_room_key(label),
+                )
+
+        return scores, zone_info
 
     async def get_zone_metadata(self) -> dict[int, ZoneMeta]:
         """Fetch per-zone structural metadata from HomeOps.

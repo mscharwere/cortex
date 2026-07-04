@@ -22,7 +22,7 @@ from cortex_python.modules.vacuumops.r1 import (
     transit_pattern_lookahead,
     zone_active_use_check,
 )
-from cortex_python.modules.vacuumops.schemas import ZoneMeta
+from cortex_python.modules.vacuumops.schemas import ZoneMeta, ZoneInfo
 from tests.unit.vacuumops.conftest import make_room, make_snapshot
 
 
@@ -55,16 +55,24 @@ async def test_per_robot_cooldown_fail(litter_box_job, clean_ctx, mock_redis):
 
 
 def test_zone_active_use_pass_idle(litter_box_job):
+    # Litter Box is a sub-zone (room_key=None) → always PASS from zone_active_use_check
     ctx = make_snapshot()
-    ctx.rooms["litter_box"] = make_room("idle", raw_occupancy=False)
-    result, gate, reason = zone_active_use_check(litter_box_job, "litter_box", ctx)
+    result, gate, reason = zone_active_use_check(litter_box_job, 14, ctx)
     assert result == "PASS"
+
+
+# Zone 21 = Living Room (room_key="living_room") — a proper room zone with a sensor
+_ROOM_ZONE_ID = 21
+_ROOM_ZONE_INFO = ZoneInfo(
+    label="Living Room", display="1F Living Room", unit_id=1, floor="1F", room_key="living_room"
+)
 
 
 def test_zone_active_use_fail_occupied(litter_box_job):
     ctx = make_snapshot()
-    ctx.rooms["litter_box"] = make_room("idle", raw_occupancy=True)
-    result, gate, reason = zone_active_use_check(litter_box_job, "litter_box", ctx)
+    ctx.zone_info[_ROOM_ZONE_ID] = _ROOM_ZONE_INFO
+    ctx.rooms["living_room"] = make_room("idle", raw_occupancy=True)
+    result, gate, reason = zone_active_use_check(litter_box_job, _ROOM_ZONE_ID, ctx)
     assert result == "FAIL"
     assert gate == "effectiveness"
     assert "occupied" in reason
@@ -73,17 +81,16 @@ def test_zone_active_use_fail_occupied(litter_box_job):
 @pytest.mark.parametrize("activity", ["active", "cooking", "eating", "transit"])
 def test_zone_active_use_fail_active_states(litter_box_job, activity):
     ctx = make_snapshot()
-    ctx.rooms["litter_box"] = make_room(activity, raw_occupancy=False)
-    result, gate, reason = zone_active_use_check(litter_box_job, "litter_box", ctx)
+    ctx.zone_info[_ROOM_ZONE_ID] = _ROOM_ZONE_INFO
+    ctx.rooms["living_room"] = make_room(activity, raw_occupancy=False)
+    result, gate, reason = zone_active_use_check(litter_box_job, _ROOM_ZONE_ID, ctx)
     assert result == "FAIL"
     assert "active_use" in reason
 
 
 def test_zone_active_use_pass_missing_sensor(litter_box_job, clean_ctx):
-    # Missing sensor → treat as clear (graceful degradation §4.2)
-    result, gate, reason = zone_active_use_check(
-        litter_box_job, "litter_box_nonexistent", clean_ctx
-    )
+    # zone_id not in zone_info → room_key=None → treat as clear (graceful degradation §4.2)
+    result, gate, reason = zone_active_use_check(litter_box_job, 9999, clean_ctx)
     assert result == "PASS"
     assert "unavailable" in reason
 
@@ -309,10 +316,19 @@ async def test_run_r1_robot_cooldown_short_circuits(
 
 
 @pytest.mark.asyncio
-async def test_run_r1_floor_not_clear_no_l1(litter_box_job, mock_redis):
+async def test_run_r1_floor_not_clear_no_l1(mock_redis):
+    # Saros1FLitterBoxJob: floor="1F", effectiveness_scope="floor"
+    # Kitchen is a 1F room — occupied kitchen triggers floor_clearance_check FAIL
+    from cortex_python.modules.vacuumops.jobs import Saros1FLitterBoxJob
+
+    job = Saros1FLitterBoxJob()
     ctx = make_snapshot()
+    ctx.zone_scores[23] = 75.0
+    ctx.zone_info[23] = ZoneInfo(
+        label="Litter Box", display="1F Litter Box", unit_id=1, floor="1F", room_key=None
+    )
     ctx.rooms["kitchen"] = make_room("cooking", raw_occupancy=True)
-    result, gate, reason = await run_r1(litter_box_job, "Litter Box", ctx, mock_redis)
+    result, gate, reason = await run_r1(job, 23, ctx, mock_redis)
     assert result == "FAIL"
     assert gate == "effectiveness"
 

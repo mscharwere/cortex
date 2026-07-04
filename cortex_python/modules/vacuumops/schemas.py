@@ -103,6 +103,17 @@ class CalendarEvent:
 
 
 @dataclass
+class ZoneInfo:
+    """Per-zone display and routing metadata. Built from /api/vacuum/units each tick."""
+
+    label: str         # raw HomeOps zone label, e.g. "Litter Box"
+    display: str       # "{floor} {label}" for UI, e.g. "3F Litter Box"
+    unit_id: int
+    floor: str         # operating floor: "1F" | "2F" | "3F"
+    room_key: str | None  # snake_case ctx.rooms key; None for sub-zones (Litter Box, etc.)
+
+
+@dataclass
 class ContextSnapshot:
     """The single object that R0/R1/L1 all reason over for one loop tick.
 
@@ -127,8 +138,8 @@ class ContextSnapshot:
     # (Phase 1: these four. Phase 2 expands as Sam 2F module needs them.)
 
     # Zone scores — read from HomeOps, NOT cached longer than one tick (D1)
-    zone_scores: dict[str, float]
-    # keys: HomeOps zone_label, e.g. "Litter Box" → 78.3
+    zone_scores: dict[int, float]
+    # keys: zone_id (int), e.g. 14 → 78.3
 
     # Upcoming events (calendar)
     upcoming_events: list[CalendarEvent]
@@ -137,6 +148,10 @@ class ContextSnapshot:
     # Robot state
     robot_states: dict[str, RobotState]
     # keys: "ethan" | "sam"
+
+    # Zone display/routing metadata — built from /api/vacuum/units each tick
+    zone_info: dict[int, ZoneInfo] = field(default_factory=dict)
+    # keys: zone_id (int). label, display, floor, room_key. Built by homeops_adapter.
 
     # Zone metadata — structural per-zone data fetched from HomeOps each tick
     zone_metadata: dict[int, ZoneMeta] = field(default_factory=dict)
@@ -216,7 +231,7 @@ class ZoneOutcome:
     loop.py collects these and assembles them into DecisionEntry + BatchEntry.
     """
 
-    zone: str  # zone label
+    zone: int  # zone_id
     action: Literal["dispatch", "defer"]
     tier: str  # "R0" | "R1" | "L1"
     gate_failed: str  # "r0" | "effectiveness" | "comfort" | "robot_cooldown" | "l1" | "none"
@@ -242,7 +257,7 @@ class BatchEntry:
     Passed to dispatch_batch() → HomeOps /api/vacuum/trigger.
     """
 
-    zone: str  # zone label
+    zone: int  # zone_id
     bundled: bool  # True if included via D11 bundle threshold
     score: float  # zone score at evaluation time
     l1_confidence: float | None = None

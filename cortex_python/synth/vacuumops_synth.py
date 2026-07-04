@@ -291,9 +291,9 @@ async def build_snapshot(
     pst = pytz.timezone("America/Los_Angeles")
     now_pst_hour = now.astimezone(pst).hour
 
-    # ── Zone scores (HomeOps) — must succeed or tick is skipped ──────────────
+    # ── Zone scores + display metadata (HomeOps) — must succeed or tick skipped ─
     # §8.5: "HomeOps get_zone_scores fails → skip this tick entirely."
-    zone_scores = await homeops_adapter.get_zone_scores()
+    zone_scores, zone_info = await homeops_adapter.get_zone_data()
     if not zone_scores:
         raise RuntimeError("HomeOps zone scores empty or unavailable — skipping tick")
 
@@ -389,6 +389,7 @@ async def build_snapshot(
         people=people,
         rooms=rooms,
         zone_scores=zone_scores,
+        zone_info=zone_info,
         zone_metadata=zone_metadata,
         upcoming_events=upcoming_events,
         robot_states=robot_states,
