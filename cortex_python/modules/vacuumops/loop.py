@@ -423,6 +423,10 @@ def _job_for_zone(zone_id: int) -> VacuumJob:
     for job in ACTIVE_JOBS:
         if zone_id in job.zones:
             return job
+    logger.warning(
+        "_job_for_zone: zone_id=%s not found in any active job — falling back to ACTIVE_JOBS[0]",
+        zone_id,
+    )
     return ACTIVE_JOBS[0]
 
 
@@ -659,6 +663,7 @@ async def persist_decision(
     homeops_adapter: Any,
     db_session_factory: async_sessionmaker[AsyncSession],
     dry_run: bool,
+    l1_results: dict[tuple[str, int], Any] | None = None,
 ) -> None:
     """Write the decision to BOTH:
     1. CORTEX-internal decision_log table (SQLAlchemy async session)
@@ -672,6 +677,12 @@ async def persist_decision(
 
     pst = pytz.timezone("America/Los_Angeles")
     ts_pst = ctx.timestamp.astimezone(pst).isoformat()
+
+    if l1_results is None:
+        l1_results = {}
+
+    # Map zone_id -> BatchEntry for quick lookup
+    batch_by_zone: dict[int, BatchEntry] = {e.zone: e for e in batch}
 
     # Build DecisionEntry
     if batch:
@@ -690,41 +701,55 @@ async def persist_decision(
 
         bundled_count = sum(1 for e in batch if e.bundled)
         reason = f"all_rules_pass+{bundled_count}_bundled" if bundled_count else "all_rules_pass"
-
-        zone_details = [
-            ZoneDecisionDetail(
-                label=_zone_display(entry.zone, ctx),
-                score=entry.score,
-                bundled=entry.bundled,
-                l1_confidence=entry.l1_confidence,
-            )
-            for entry in batch
-        ]
     else:
         # No dispatch — find the dominant deferral reason
         decision_str = "skip"
         dispatched_at = None
         l1_confidence = None
 
-        # Pick the first zone that was evaluated to represent the skip
         dominant = zone_outcomes[0] if zone_outcomes else None
         if dominant:
             gate_failed = dominant.gate_failed
             tier_reached = dominant.tier
             reason = dominant.reason
-            zone_details = [
-                ZoneDecisionDetail(
-                    label=_zone_display(dominant.zone, ctx),
-                    score=dominant.score,
-                    bundled=False,
-                    l1_confidence=dominant.l1_confidence,
-                )
-            ]
         else:
             gate_failed = "r0"
             tier_reached = "R0"
             reason = "no_zones_evaluated"
-            zone_details = []
+
+    # Unified per-zone detail — log ALL evaluated zones regardless of outcome
+    zone_details: list[ZoneDecisionDetail] = []
+    for zo in zone_outcomes:
+        be = batch_by_zone.get(zo.zone)
+        info = ctx.zone_info.get(zo.zone)
+        job = _job_for_zone(zo.zone)
+        l1 = l1_results.get((job.job_id, zo.zone))
+
+        if be is not None:
+            result = "bundled" if be.bundled else "dispatch"
+            l1_conf = be.l1_confidence
+        else:
+            result = "defer"
+            l1_conf = zo.l1_confidence
+
+        zone_details.append(
+            ZoneDecisionDetail(
+                label=_zone_display(zo.zone, ctx),
+                display=info.display if info else str(zo.zone),
+                score=zo.score,
+                bundled=(be.bundled if be else False),
+                result=result,
+                gate_failed=zo.gate_failed if zo.action == "defer" else None,
+                gate_reason=zo.reason if zo.action == "defer" else None,
+                l1_confidence=l1_conf,
+                l1_decision=l1.decision if l1 else None,
+                l1_reason=l1.reason if l1 else None,
+                l1_defer_until_hint=l1.defer_until_hint if l1 else None,
+                l1_passes=str(l1.passes) if (l1 and l1.passes is not None) else None,
+                l1_intensity=str(l1.intensity) if (l1 and l1.intensity is not None) else None,
+                l1_params_reason=l1.params_reason if l1 else None,
+            )
+        )
 
     decision_entry = DecisionEntry(
         tick_id=tick_id,
@@ -1006,6 +1031,7 @@ async def vacuumops_loop(settings: Settings) -> None:
                     homeops_adapter=homeops_adapter,
                     db_session_factory=db_session_factory,
                     dry_run=vacuumops_cfg.dry_run,
+                    l1_results=per_robot_l1.get(robot, {}),
                 )
 
                 if batch:
