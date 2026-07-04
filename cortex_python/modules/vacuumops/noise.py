@@ -23,8 +23,15 @@ from cortex_python.modules.vacuumops.schemas import ContextSnapshot
 # Spec: §4.2
 FLOOR_ROOM_MAP: dict[str, list[str]] = {
     "1F": ["living_room", "kitchen", "hallway", "dining_room", "prep_area", "bathroom"],
-    "2F": ["master_bedroom", "master_bath", "upper_hallway", "carlitos_room", "kids_table_area"],
-    "3F": ["office", "family_room"],  # subscribe if sensors exist; degrade gracefully if not
+    "2F": [
+        "master_bedroom",
+        "master_bathroom",
+        "upper_hallway",
+        "carlitos_room",
+        "daniel_room",
+        "kids_table_area",
+    ],
+    "3F": ["loft", "office", "gym", "family_room"],
 }
 
 

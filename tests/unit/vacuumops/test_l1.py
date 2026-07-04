@@ -7,9 +7,8 @@ Covers:
 
 from __future__ import annotations
 
-import pytest
 
-from cortex_python.modules.vacuumops.jobs import LitterBoxJob
+from cortex_python.modules.vacuumops.jobs import Ethan3FLitterBoxJob
 from cortex_python.modules.vacuumops.l1 import L1Decision, resolve_params
 from cortex_python.modules.vacuumops.loop import assemble_batch
 from cortex_python.modules.vacuumops.schemas import ZoneOutcome
@@ -21,7 +20,7 @@ from tests.unit.vacuumops.conftest import make_snapshot
 
 def test_resolve_params_all_l1():
     """L1 returns both passes + intensity → source='l1'."""
-    job = LitterBoxJob()
+    job = Ethan3FLitterBoxJob()
     l1 = L1Decision(
         decision="dispatch",
         confidence=0.9,
@@ -38,7 +37,7 @@ def test_resolve_params_all_l1():
 
 def test_resolve_params_mixed():
     """L1 returns only passes (intensity=None) → source='mixed', intensity falls back to job default."""
-    job = LitterBoxJob()
+    job = Ethan3FLitterBoxJob()
     l1 = L1Decision(
         decision="dispatch",
         confidence=0.75,
@@ -56,7 +55,7 @@ def test_resolve_params_mixed():
 
 def test_resolve_params_default():
     """l1=None → both fall back to job defaults, source='default'."""
-    job = LitterBoxJob()
+    job = Ethan3FLitterBoxJob()
     passes, intensity, src = resolve_params(job, None)
     assert passes == job.cleaning_params.get("passes", "auto")
     assert intensity == job.cleaning_params.get("intensity", "auto")
@@ -68,7 +67,7 @@ def test_resolve_params_default():
 
 def test_assemble_batch_uses_l1_results():
     """Candidate with l1_results entry → BatchEntry.params_source='l1', params_reason set."""
-    job = LitterBoxJob()
+    job = Ethan3FLitterBoxJob()
     ctx = make_snapshot(litter_box_score=75.0)
 
     # L1-decided outcome
@@ -108,7 +107,7 @@ def test_assemble_batch_bundled_uses_default():
     from dataclasses import dataclass, field
 
     @dataclass
-    class TwoZoneJob(LitterBoxJob):
+    class TwoZoneJob(Ethan3FLitterBoxJob):
         job_id: str = "two_zone_test"
         zones: list = field(default_factory=lambda: ["Litter Box", "Hallway"])
 
