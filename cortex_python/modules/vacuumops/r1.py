@@ -65,6 +65,8 @@ async def per_robot_cooldown_check(
 
     Redis key: cortex:vacuumops:robot_cooldown:<robot>
     Set on every dispatch (single or batch); checked before any rule evaluation.
+    zone_id is accepted for signature consistency with other R1 rules but is unused —
+    this check is robot-level, not zone-level.
     """
     key = _ROBOT_COOLDOWN_KEY.format(robot=job.robot)
     exists = await redis_client.exists(key)

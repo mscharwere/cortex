@@ -77,32 +77,32 @@ class HomeOpsAdapter:
             r.raise_for_status()
             data = r.json()
 
-        scores: dict[int, float] = {}
-        zone_info: dict[int, ZoneInfo] = {}
+            scores: dict[int, float] = {}
+            zone_info: dict[int, ZoneInfo] = {}
 
-        for unit in data.get("data", []):
-            unit_id = unit.get("id")
-            floor = unit.get("floor", "")
-            if unit_id is None:
-                continue
-            for zone in unit.get("zones", []):
-                zone_id = zone.get("id")
-                label = zone.get("label")
-                score = zone.get("score")
-                if zone_id is None or label is None:
+            for unit in data.get("data", []):
+                unit_id = unit.get("id")
+                floor = unit.get("floor", "")
+                if unit_id is None:
                     continue
-                zone_id = int(zone_id)
-                display = f"{floor} {label}".strip() if floor else label
-                scores[zone_id] = float(score) if score is not None else 0.0
-                zone_info[zone_id] = ZoneInfo(
-                    label=label,
-                    display=display,
-                    unit_id=int(unit_id),
-                    floor=floor,
-                    room_key=_derive_room_key(label),
-                )
+                for zone in unit.get("zones", []):
+                    zone_id = zone.get("id")
+                    label = zone.get("label")
+                    score = zone.get("score")
+                    if zone_id is None or label is None:
+                        continue
+                    zone_id = int(zone_id)
+                    display = f"{floor} {label}".strip() if floor else label
+                    scores[zone_id] = float(score) if score is not None else 0.0
+                    zone_info[zone_id] = ZoneInfo(
+                        label=label,
+                        display=display,
+                        unit_id=int(unit_id),
+                        floor=floor,
+                        room_key=_derive_room_key(label),
+                    )
 
-        return scores, zone_info
+            return scores, zone_info
 
     async def get_zone_metadata(self) -> dict[int, ZoneMeta]:
         """Fetch per-zone structural metadata from HomeOps.
