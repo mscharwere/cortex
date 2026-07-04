@@ -467,7 +467,11 @@ def assemble_batch(
 
     batch: list[BatchEntry] = []
     for zo in primary:
-        job = _job_for_zone(zo.zone)
+        try:
+            job = _job_for_zone(zo.zone)
+        except ValueError:
+            log.warning("assemble_batch_unknown_zone", zone_id=zo.zone)
+            continue
         l1 = l1_results.get((job.job_id, zo.zone))
         passes, intensity, src = resolve_params(job, l1)
         params_reason = l1.params_reason if (l1 and src != "default") else None
@@ -489,7 +493,11 @@ def assemble_batch(
     for zo in zone_outcomes:
         if zo.zone in primary_zones:
             continue
-        job = _job_for_zone(zo.zone)
+        try:
+            job = _job_for_zone(zo.zone)
+        except ValueError:
+            log.warning("assemble_batch_unknown_zone", zone_id=zo.zone)
+            continue
         if job.robot != robot:
             continue
 
@@ -723,7 +731,11 @@ async def persist_decision(
     for zo in zone_outcomes:
         be = batch_by_zone.get(zo.zone)
         info = ctx.zone_info.get(zo.zone)
-        job = _job_for_zone(zo.zone)
+        try:
+            job = _job_for_zone(zo.zone)
+        except ValueError:
+            log.warning("persist_decision_unknown_zone", zone_id=zo.zone, tick_id=tick_id)
+            continue
         l1 = l1_results.get((job.job_id, zo.zone))
 
         if be is not None:
