@@ -154,7 +154,8 @@ class HomeOpsAdapter:
                 contained_by=z.get("contained_by"),
                 dispatchable=z.get("dispatchable", True),
                 low_disruption=bool(z.get("low_disruption", False)),
-                # Spec §3: new column; seeded true for Litter Box by HomeOps migration 20260530000000.
+                # Spec §3: new column; seeded true for Litter Box by HomeOps migration
+                # 20260530000000.
                 occupancy_sensor=z.get("occupancy_sensor"),
                 # Spec §1.1: already in HomeOps API response (migration 014); was dropped here.
                 # Now mapped so Override 2 can resolve the zone's parent room key.

@@ -83,7 +83,9 @@ async def per_robot_cooldown_check(
 # ── Effectiveness rules ───────────────────────────────────────────────────────
 
 
-def zone_active_use_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tuple[str, str, str]:
+def zone_active_use_check(
+    job: VacuumJob, zone_id: int, ctx: ContextSnapshot
+) -> tuple[str, str, str]:
     """R1-E1: Zone must not be actively occupied or in active use.
 
     Checks:
@@ -113,7 +115,9 @@ def zone_active_use_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) ->
     return "PASS", "none", "zone_clear"
 
 
-def floor_clearance_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tuple[str, str, str]:
+def floor_clearance_check(
+    job: VacuumJob, zone_id: int, ctx: ContextSnapshot
+) -> tuple[str, str, str]:
     """R1-E2: Operating floor must be clear (no raw_occupancy across floor rooms).
 
     Checks every room in FLOOR_ROOM_MAP[job.floor]. The target zone's own

@@ -86,6 +86,10 @@ def make_snapshot(
         "upper_hallway": make_room("idle"),
         "master_bath": make_room("idle"),
         "kids_table_area": make_room("idle"),
+        "loft": make_room("idle"),
+        "office": make_room("idle"),
+        "gym": make_room("idle"),
+        "daniel_room": make_room("idle"),
     }
 
     ctx = ContextSnapshot(

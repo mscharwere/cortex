@@ -58,7 +58,6 @@ from cortex_python.modules.vacuumops.schemas import (
     DecisionEntry,
     DropRecord,
     ZoneDecisionDetail,
-    ZoneInfo,
     ZoneOutcome,
 )
 from cortex_python.modules.vacuumops.utils import parse_pattern_time as _parse_pattern_time_util
@@ -408,7 +407,11 @@ def _noise_acceptable_simple(job: VacuumJob, zone_id: int, ctx: ContextSnapshot)
     return result != "FAIL"
 
 
-async def _per_zone_cooldown_clear(job: VacuumJob, zone_id: int, redis_client: aioredis.Redis) -> bool:
+async def _per_zone_cooldown_clear(
+    job: VacuumJob,
+    zone_id: int,
+    redis_client: aioredis.Redis,
+) -> bool:
     """Check if per-zone cooldown is clear (for bundle sweep)."""
     key = _R0_ZONE_COOLDOWN_KEY.format(job_id=job.job_id, zone_id=zone_id)
     exists = await redis_client.exists(key)
@@ -563,7 +566,11 @@ async def dispatch_batch(
     zones_payload = [
         {
             # HomeOps /api/vacuum/trigger still expects zone label strings — resolve at dispatch
-            "label": ctx.zone_info[entry.zone].label if entry.zone in ctx.zone_info else str(entry.zone),
+            "label": (
+                ctx.zone_info[entry.zone].label
+                if entry.zone in ctx.zone_info
+                else str(entry.zone)
+            ),
             "passes": entry.passes,
             "intensity": entry.intensity,
             "bundled": entry.bundled,
