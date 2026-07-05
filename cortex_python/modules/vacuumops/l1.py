@@ -357,6 +357,13 @@ async def run_l1(
         ],
         "temperature": 0.1,  # Low temperature — we want deterministic judgment
         "max_tokens": 512,  # Bumped from 256 — cleaning params section adds ~100 tokens
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "L1Decision",
+                "schema": L1Decision.model_json_schema(),
+            },
+        },
     }
 
     # Call LiteLLM
