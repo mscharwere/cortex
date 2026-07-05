@@ -362,7 +362,6 @@ async def run_l1(
             "json_schema": {
                 "name": "L1Decision",
                 "schema": L1Decision.model_json_schema(),
-                "strict": True,
             },
         },
     }
