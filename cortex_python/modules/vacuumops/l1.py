@@ -9,8 +9,9 @@ batching — it answers exactly one question: "is this specific zone acceptable
 right now?"
 
 Path: Python → HTTPX → LiteLLM (http://ollama.perwnet.com:4000) → gemma4:31b.
-JSON-schema response enforced via Pydantic. Timeout 120s read/write (bumped
-from 30s on 2026-07-04 to handle gemma4:31b cold-start scenarios).
+JSON-schema response enforced via Pydantic. Read timeout 120s (bumped from
+30s on 2026-07-04 to handle gemma4:31b cold-start scenarios); write timeout
+remains 30s — cold-start is a read/generation latency problem, not write.
 
 Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §7.3
 """
@@ -37,10 +38,10 @@ log = structlog.get_logger()
 # L1 model — gemma4:31b via LiteLLM proxy (MS-S1 MAX)
 _L1_MODEL = "gemma4:31b"
 
-# L1 HTTPX timeout — 120s read/write to handle gemma4:31b cold-start scenarios.
-# Bumped from 30s (2026-07-04); still below the 90s litellm_client default but
-# generous enough to survive occasional model warm-up latency.
-_L1_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=5.0)
+# L1 HTTPX timeout — 120s read to handle gemma4:31b cold-start scenarios.
+# Read bumped from 30s (2026-07-04); write stays at 30s (unaffected by cold-start).
+# 120s is still below the 180s litellm_client default (adapters/litellm_client.py).
+_L1_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=5.0)
 
 # Redis key template for L1 cache
 # cortex:vacuumops:l1:litter_box:<context_hash>
