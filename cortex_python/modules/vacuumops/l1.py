@@ -9,8 +9,8 @@ batching — it answers exactly one question: "is this specific zone acceptable
 right now?"
 
 Path: Python → HTTPX → LiteLLM (http://ollama.perwnet.com:4000) → gemma4:31b.
-JSON-schema response enforced via Pydantic. Timeout 30s (tighter than the 90s
-system default — vacuum dispatch should be fast or skip).
+JSON-schema response enforced via Pydantic. Timeout 120s read/write (bumped
+from 30s on 2026-07-04 to handle gemma4:31b cold-start scenarios).
 
 Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §7.3
 """
@@ -37,9 +37,10 @@ log = structlog.get_logger()
 # L1 model — gemma4:31b via LiteLLM proxy (MS-S1 MAX)
 _L1_MODEL = "gemma4:31b"
 
-# L1 HTTPX timeout — 30s read (vacuum dispatch should be fast or skip)
-# Tighter than the 90s litellm_client default — intentional per spec.
-_L1_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=5.0)
+# L1 HTTPX timeout — 120s read/write to handle gemma4:31b cold-start scenarios.
+# Bumped from 30s (2026-07-04); still below the 90s litellm_client default but
+# generous enough to survive occasional model warm-up latency.
+_L1_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=5.0)
 
 # Redis key template for L1 cache
 # cortex:vacuumops:l1:litter_box:<context_hash>
@@ -297,7 +298,7 @@ async def run_l1(
     Per D13: one prompt per zone; LLM never reasons about batching.
 
     Failure modes (all conservative — defer):
-      - Timeout (30s)          → defer with reason "l1_timeout"
+      - Timeout (120s)         → defer with reason "l1_timeout"
       - Schema parse fail      → defer with reason "l1_schema_fail"
       - confidence < threshold → defer with reason "l1_low_confidence"
                                  (no AIT overflow queue in Phase 1 — just defer)
