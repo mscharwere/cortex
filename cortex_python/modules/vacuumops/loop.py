@@ -935,8 +935,12 @@ async def vacuumops_loop(settings: Settings) -> None:
             patterns = _load_patterns()
 
             # Build snapshot
+            # build_snapshot returns (ctx, unit_dry_runs) where unit_dry_runs is
+            # dict[robot_name → dry_run bool] from the HomeOps vac_units.dry_run column.
             try:
-                ctx = await build_snapshot(tick_id, ha_adapter, homeops_adapter, settings)
+                ctx, unit_dry_runs = await build_snapshot(
+                    tick_id, ha_adapter, homeops_adapter, settings
+                )
             except Exception as exc:
                 log.error("snapshot_build_failed", tick_id=tick_id, error=str(exc))
                 # Skip tick — zone score is required (§8.5)
@@ -1035,6 +1039,13 @@ async def vacuumops_loop(settings: Settings) -> None:
                     l1_results=per_robot_l1.get(robot, {}),
                 )
 
+                # Effective dry_run for this robot:
+                #   global_dry_run (CORTEX_VACUUMOPS_DRY_RUN=true) → always dry_run.
+                #   otherwise → per-unit flag from HomeOps vac_units.dry_run column.
+                # unit_dry_runs defaults to True (safe) when a robot is not in the map
+                # (e.g. a new unit added before the column migration runs).
+                effective_dry_run = vacuumops_cfg.dry_run or unit_dry_runs.get(robot, True)
+
                 await persist_decision(
                     tick_id=tick_id,
                     robot=robot,
@@ -1043,7 +1054,7 @@ async def vacuumops_loop(settings: Settings) -> None:
                     ctx=ctx,
                     homeops_adapter=homeops_adapter,
                     db_session_factory=db_session_factory,
-                    dry_run=vacuumops_cfg.dry_run,
+                    dry_run=effective_dry_run,
                     l1_results=per_robot_l1.get(robot, {}),
                 )
 
@@ -1057,7 +1068,7 @@ async def vacuumops_loop(settings: Settings) -> None:
                             settings=settings,
                             homeops_adapter=homeops_adapter,
                             vacuumops_cfg=vacuumops_cfg,
-                            dry_run=vacuumops_cfg.dry_run,
+                            dry_run=effective_dry_run,
                         )
                         await _set_per_zone_cooldowns(batch, ACTIVE_JOBS, redis_client)
                         await _set_robot_cooldown(robot, vacuumops_cfg, redis_client)
@@ -1075,8 +1086,20 @@ async def vacuumops_loop(settings: Settings) -> None:
                     if skip_reasons:
                         consecutive_skip_reason = skip_reasons[0]
 
-            # Publish loop status to HA
-            loop_state = "dry_run" if vacuumops_cfg.dry_run else "healthy"
+            # Publish loop status to HA.
+            # loop_state reflects the effective dry_run posture across all active robots:
+            #   "dry_run" — global override OR all units are dry_run
+            #   "partial"  — some units live, some dry_run (global override is false)
+            #   "healthy"  — all units are live (global override is false)
+            all_robots = [job.robot for job in ACTIVE_JOBS]
+            if vacuumops_cfg.dry_run or (
+                all_robots and all(unit_dry_runs.get(r, True) for r in all_robots)
+            ):
+                loop_state = "dry_run"
+            elif any(unit_dry_runs.get(r, True) for r in all_robots):
+                loop_state = "partial"
+            else:
+                loop_state = "healthy"
             last_decision = consecutive_skip_reason or (
                 "dispatch" if dispatched_this_tick else "defer"
             )

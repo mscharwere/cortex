@@ -277,11 +277,17 @@ async def build_snapshot(
     ha_adapter: HARestAdapter,
     homeops_adapter: HomeOpsAdapter,
     settings: Settings,
-) -> ContextSnapshot:
+) -> tuple[ContextSnapshot, dict[str, bool]]:
     """Build a ContextSnapshot for one loop tick.
 
     Fetches all required data, applies graceful degradation per §8.5.
     Raises if HomeOps zone scores are unavailable (caller skips tick).
+
+    Returns:
+      (ctx, unit_dry_runs) where unit_dry_runs is dict[robot_name → dry_run bool].
+      robot_name is the lowercased unit nickname (e.g. "ethan", "sam").
+      unit_dry_runs is consumed by the loop to compute per-robot effective dry_run;
+      it is NOT stored on ContextSnapshot (avoids coupling schema to dispatch concerns).
     """
     now = datetime.now(tz=UTC)
 
@@ -293,7 +299,12 @@ async def build_snapshot(
 
     # ── Zone scores + display metadata (HomeOps) — must succeed or tick skipped ─
     # §8.5: "HomeOps get_zone_scores fails → skip this tick entirely."
-    zone_scores, zone_info = await homeops_adapter.get_zone_data()
+    # get_zone_data() now also returns unit_dry_runs (dict[robot → bool]).
+    # The synth does NOT attach unit_dry_runs to ContextSnapshot — it is consumed
+    # by the loop directly after snapshot build (passed in via get_zone_data return).
+    # We store it in the return value of build_snapshot so the loop can pass it
+    # to dispatch_batch without coupling dry_run state into ContextSnapshot.
+    zone_scores, zone_info, unit_dry_runs = await homeops_adapter.get_zone_data()
     if not zone_scores:
         raise RuntimeError("HomeOps zone scores empty or unavailable — skipping tick")
 
@@ -412,4 +423,4 @@ async def build_snapshot(
     else:
         log.debug("snapshot_built", tick_id=tick_id, zone_count=len(zone_scores))
 
-    return ctx
+    return ctx, unit_dry_runs
