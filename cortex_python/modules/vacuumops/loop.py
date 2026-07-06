@@ -1039,12 +1039,11 @@ async def vacuumops_loop(settings: Settings) -> None:
                     l1_results=per_robot_l1.get(robot, {}),
                 )
 
-                # Effective dry_run for this robot:
-                #   global_dry_run (CORTEX_VACUUMOPS_DRY_RUN=true) → always dry_run.
-                #   otherwise → per-unit flag from HomeOps vac_units.dry_run column.
+                # Effective dry_run for this robot: per-unit flag from HomeOps
+                # vac_units.dry_run column is the sole control.
                 # unit_dry_runs defaults to True (safe) when a robot is not in the map
                 # (e.g. a new unit added before the column migration runs).
-                effective_dry_run = vacuumops_cfg.dry_run or unit_dry_runs.get(robot, True)
+                effective_dry_run = unit_dry_runs.get(robot, True)
 
                 await persist_decision(
                     tick_id=tick_id,
@@ -1087,14 +1086,15 @@ async def vacuumops_loop(settings: Settings) -> None:
                         consecutive_skip_reason = skip_reasons[0]
 
             # Publish loop status to HA.
-            # loop_state reflects the effective dry_run posture across all active robots:
-            #   "dry_run" — global override OR all units are dry_run
-            #   "partial"  — some units live, some dry_run (global override is false)
-            #   "healthy"  — all units are live (global override is false)
+            # loop_state reflects the effective dry_run posture across all active robots
+            # derived solely from per-unit DB flags (vac_units.dry_run column):
+            #   "dry_run" — all units are dry_run
+            #   "partial"  — some units live, some dry_run
+            #   "healthy"  — all units are live
             all_robots = [job.robot for job in ACTIVE_JOBS]
-            if vacuumops_cfg.dry_run or (
-                all_robots and all(unit_dry_runs.get(r, True) for r in all_robots)
-            ):
+            if not all_robots:
+                loop_state = "idle"
+            elif all(unit_dry_runs.get(r, True) for r in all_robots):
                 loop_state = "dry_run"
             elif any(unit_dry_runs.get(r, True) for r in all_robots):
                 loop_state = "partial"
