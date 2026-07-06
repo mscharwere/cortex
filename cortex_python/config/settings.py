@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     homeassistant_token: str = ""  # long-lived HA token
 
     # ── VacuumOps module ───────────────────────────────────────────────────────
-    cortex_vacuumops_dry_run: bool = True  # Phase 1: dry-run by default
+    cortex_vacuumops_dry_run: bool = False  # Global override removed; per-unit DB flags are sole control
 
     # ── Service behaviour ──────────────────────────────────────────────────────
     log_level: str = "INFO"
