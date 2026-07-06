@@ -1092,7 +1092,9 @@ async def vacuumops_loop(settings: Settings) -> None:
             #   "partial"  — some units live, some dry_run
             #   "healthy"  — all units are live
             all_robots = [job.robot for job in ACTIVE_JOBS]
-            if all_robots and all(unit_dry_runs.get(r, True) for r in all_robots):
+            if not all_robots:
+                loop_state = "idle"
+            elif all(unit_dry_runs.get(r, True) for r in all_robots):
                 loop_state = "dry_run"
             elif any(unit_dry_runs.get(r, True) for r in all_robots):
                 loop_state = "partial"

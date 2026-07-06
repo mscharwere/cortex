@@ -84,8 +84,8 @@ class HomeOpsAdapter:
                           robot_name is the lowercased unit nickname (e.g. "ethan", "sam")
 
         unit_dry_runs is used by the loop to compute the effective dry_run flag per robot:
-          effective = global_dry_run OR unit_dry_runs.get(robot, True)
-        The global CORTEX_VACUUMOPS_DRY_RUN env var always takes precedence.
+          effective = unit_dry_runs.get(robot, True)
+        Defaults to True (dry_run) when a robot has no entry in the DB.
 
         Raises on error so the caller (synth) can handle the skip-tick path per §8.5.
         """
