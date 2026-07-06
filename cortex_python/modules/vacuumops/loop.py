@@ -938,7 +938,9 @@ async def vacuumops_loop(settings: Settings) -> None:
             # build_snapshot returns (ctx, unit_dry_runs) where unit_dry_runs is
             # dict[robot_name → dry_run bool] from the HomeOps vac_units.dry_run column.
             try:
-                ctx, unit_dry_runs = await build_snapshot(tick_id, ha_adapter, homeops_adapter, settings)
+                ctx, unit_dry_runs = await build_snapshot(
+                    tick_id, ha_adapter, homeops_adapter, settings
+                )
             except Exception as exc:
                 log.error("snapshot_build_failed", tick_id=tick_id, error=str(exc))
                 # Skip tick — zone score is required (§8.5)
@@ -1090,9 +1092,9 @@ async def vacuumops_loop(settings: Settings) -> None:
             #   "partial"  — some units live, some dry_run (global override is false)
             #   "healthy"  — all units are live (global override is false)
             all_robots = [job.robot for job in ACTIVE_JOBS]
-            if vacuumops_cfg.dry_run:
-                loop_state = "dry_run"
-            elif all_robots and all(unit_dry_runs.get(r, True) for r in all_robots):
+            if vacuumops_cfg.dry_run or (
+                all_robots and all(unit_dry_runs.get(r, True) for r in all_robots)
+            ):
                 loop_state = "dry_run"
             elif any(unit_dry_runs.get(r, True) for r in all_robots):
                 loop_state = "partial"

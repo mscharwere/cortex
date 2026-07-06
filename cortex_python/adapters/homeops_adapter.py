@@ -101,9 +101,11 @@ class HomeOpsAdapter:
             for unit in data.get("data", []):
                 unit_id = unit.get("id")
                 floor = unit.get("floor", "")
-                nickname = unit.get("nickname") or ""
-                robot_name = nickname.lower()
+                robot_name = (unit.get("nickname") or "").strip().lower()
                 if unit_id is None:
+                    continue
+                if not robot_name:
+                    log.warning("unit_dry_run_skipped_no_nickname", unit_id=unit_id)
                     continue
 
                 # Per-unit dry_run: default True (safe) if column absent (pre-migration).
