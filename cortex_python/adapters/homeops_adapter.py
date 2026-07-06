@@ -72,14 +72,20 @@ class HomeOpsAdapter:
             follow_redirects=True,
         )
 
-    async def get_zone_data(self) -> tuple[dict[int, float], dict[int, ZoneInfo]]:
-        """Fetch zone dirtiness scores and display metadata from HomeOps.
+    async def get_zone_data(self) -> tuple[dict[int, float], dict[int, ZoneInfo], dict[str, bool]]:
+        """Fetch zone dirtiness scores, display metadata, and per-unit dry_run flags from HomeOps.
 
         GET /api/vacuum/units
-        Parses response: data[].{id, floor, zones[].{id, label, score}}
+        Parses response: data[].{id, floor, nickname, dry_run, zones[].{id, label, score}}
         Returns:
-          scores:    dict[zone_id → score]
-          zone_info: dict[zone_id → ZoneInfo]
+          scores:         dict[zone_id → score]
+          zone_info:      dict[zone_id → ZoneInfo]
+          unit_dry_runs:  dict[robot_name → dry_run bool]
+                          robot_name is the lowercased unit nickname (e.g. "ethan", "sam")
+
+        unit_dry_runs is used by the loop to compute the effective dry_run flag per robot:
+          effective = global_dry_run OR unit_dry_runs.get(robot, True)
+        The global CORTEX_VACUUMOPS_DRY_RUN env var always takes precedence.
 
         Raises on error so the caller (synth) can handle the skip-tick path per §8.5.
         """
@@ -90,12 +96,19 @@ class HomeOpsAdapter:
 
             scores: dict[int, float] = {}
             zone_info: dict[int, ZoneInfo] = {}
+            unit_dry_runs: dict[str, bool] = {}
 
             for unit in data.get("data", []):
                 unit_id = unit.get("id")
                 floor = unit.get("floor", "")
+                nickname = unit.get("nickname") or ""
+                robot_name = nickname.lower()
                 if unit_id is None:
                     continue
+
+                # Per-unit dry_run: default True (safe) if column absent (pre-migration).
+                unit_dry_runs[robot_name] = bool(unit.get("dry_run", True))
+
                 for zone in unit.get("zones", []):
                     zone_id = zone.get("id")
                     label = zone.get("label")
@@ -116,7 +129,7 @@ class HomeOpsAdapter:
                         room_key=room_key,
                     )
 
-            return scores, zone_info
+            return scores, zone_info, unit_dry_runs
 
     async def get_zone_metadata(self) -> dict[int, ZoneMeta]:
         """Fetch per-zone structural metadata from HomeOps.
