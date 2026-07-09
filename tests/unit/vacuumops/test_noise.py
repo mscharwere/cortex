@@ -83,44 +83,58 @@ def test_noise_impact_house_radius(clean_ctx):
 
 def test_noise_budget_full_open(clean_ctx):
     """All clear → budget = 10.0."""
-    result = noise_budget(clean_ctx)
+    result = noise_budget(clean_ctx, "1F")
     assert result == pytest.approx(10.0)
 
 
 def test_noise_budget_piano_active(clean_ctx):
-    """Elena piano → budget = 10 * 0.05 = 0.5."""
+    """Elena piano → budget = 10 * 0.05 = 0.5 (floor-independent)."""
     clean_ctx.people["elena"] = PersonActivity(
         activity="home_idle", confidence=0.9, piano=True
     )
-    result = noise_budget(clean_ctx)
+    result = noise_budget(clean_ctx, "1F")
     assert result == pytest.approx(0.5)
 
 
 def test_noise_budget_quiet_hours_1f(clean_ctx):
     """Quiet hours 1F → budget = 10 * 0.4 = 4.0."""
     clean_ctx.quiet_hours_1f = True
-    result = noise_budget(clean_ctx)
+    result = noise_budget(clean_ctx, "1F")
     assert result == pytest.approx(4.0)
 
 
-def test_noise_budget_quiet_hours_2f(clean_ctx):
-    """Quiet hours 2F → budget = 10 * 0.2 = 2.0."""
+def test_noise_budget_sleep_active_2f_floor(clean_ctx):
+    """2F sleep, 2F job → budget = 10 * 0.05 = 0.5 (blocked — in the bedrooms)."""
     clean_ctx.quiet_hours_2f = True
-    result = noise_budget(clean_ctx)
+    result = noise_budget(clean_ctx, "2F")
+    assert result == pytest.approx(0.5)
+
+
+def test_noise_budget_sleep_active_3f_floor(clean_ctx):
+    """2F sleep, 3F job → budget = 10 * 0.20 = 2.0 (audible through 2F ceiling — blocked same as before)."""
+    clean_ctx.quiet_hours_2f = True
+    result = noise_budget(clean_ctx, "3F")
     assert result == pytest.approx(2.0)
+
+
+def test_noise_budget_sleep_active_1f_floor(clean_ctx):
+    """2F sleep, 1F job → budget = 10 * 0.80 = 8.0 (sound doesn't reach 2F)."""
+    clean_ctx.quiet_hours_2f = True
+    result = noise_budget(clean_ctx, "1F")
+    assert result == pytest.approx(8.0)
 
 
 def test_noise_budget_cooking(clean_ctx):
     """Active cooking → budget = 10 * 0.3 = 3.0."""
     clean_ctx.rooms["kitchen"] = make_room("cooking", confidence=0.8)
-    result = noise_budget(clean_ctx)
+    result = noise_budget(clean_ctx, "1F")
     assert result == pytest.approx(3.0)
 
 
 def test_noise_budget_eating(clean_ctx):
     """Active eating → budget = 10 * 0.5 = 5.0."""
     clean_ctx.rooms["kitchen"] = make_room("eating", confidence=0.8)
-    result = noise_budget(clean_ctx)
+    result = noise_budget(clean_ctx, "1F")
     assert result == pytest.approx(5.0)
 
 
@@ -129,7 +143,7 @@ def test_noise_budget_living_room_occupied(clean_ctx):
     clean_ctx.rooms["living_room"] = make_room(
         "active", confidence=0.8, raw_occupancy=True
     )
-    result = noise_budget(clean_ctx)
+    result = noise_budget(clean_ctx, "1F")
     assert result == pytest.approx(7.0)
 
 
@@ -146,7 +160,7 @@ def test_noise_budget_near_term_event(clean_ctx):
         calendar_id="calendar.perez_melgar_family",
     )
     clean_ctx.upcoming_events = [event]
-    result = noise_budget(clean_ctx)
+    result = noise_budget(clean_ctx, "1F")
     assert result == pytest.approx(6.0)
 
 
@@ -156,7 +170,7 @@ def test_noise_budget_multiplicative(clean_ctx):
         activity="home_idle", confidence=0.9, piano=True
     )
     clean_ctx.quiet_hours_1f = True
-    result = noise_budget(clean_ctx)
+    result = noise_budget(clean_ctx, "1F")
     assert result == pytest.approx(0.2)
 
 
@@ -181,7 +195,7 @@ def test_scenario_a_saturday_9pm_family_in_living_room():
     ctx = make_snapshot()
     ctx.rooms["living_room"] = make_room("active", confidence=0.8, raw_occupancy=True)
 
-    budget = noise_budget(ctx)
+    budget = noise_budget(ctx, job.floor)
     impact = noise_impact(job, ctx)
 
     assert budget == pytest.approx(7.0)
@@ -202,7 +216,7 @@ def test_scenario_b_tuesday_8am_elena_piano():
         activity="home_idle", confidence=0.9, piano=True
     )
 
-    budget = noise_budget(ctx)
+    budget = noise_budget(ctx, job.floor)
     impact = noise_impact(job, ctx)
 
     assert budget == pytest.approx(0.5)
@@ -222,7 +236,7 @@ def test_scenario_c_wednesday_11am_everyone_away():
     for name in ctx.people:
         ctx.people[name] = PersonActivity(activity="away", confidence=0.95)
 
-    budget = noise_budget(ctx)
+    budget = noise_budget(ctx, job.floor)
     impact = noise_impact(job, ctx)
 
     assert budget == pytest.approx(10.0)
@@ -240,7 +254,7 @@ def test_scenario_d_weekday_7am_quiet():
 
     job = Ethan3FLitterBoxJob()
     ctx = make_snapshot()
-    budget = noise_budget(ctx)
+    budget = noise_budget(ctx, job.floor)
     impact = noise_impact(job, ctx)
 
     # House is quiet — noise gate passes
