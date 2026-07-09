@@ -77,8 +77,8 @@ def noise_budget(ctx: ContextSnapshot, floor: str) -> float:
 
     The ``floor`` parameter makes 2F sleep suppression floor-aware:
       - 2F jobs are blocked (×0.05) — running in the bedrooms themselves.
-      - 3F jobs are significantly suppressed (×0.25) — Ethan is audible in the
-        2F ceiling as it moves across the loft/gym above.
+      - 3F jobs preserve existing blocking behavior (×0.20) — Ethan is audible
+        through the 2F ceiling as it moves across the loft/gym above.
       - 1F jobs receive only a mild reduction (×0.80) — sound from the ground
         floor does not meaningfully reach 2F bedrooms.
 
@@ -101,7 +101,7 @@ def noise_budget(ctx: ContextSnapshot, floor: str) -> float:
         if floor == "2F":
             budget *= 0.05   # block — running in the bedrooms
         elif floor == "3F":
-            budget *= 0.25   # audible in 2F ceiling; significant suppression
+            budget *= 0.20   # audible through 2F ceiling — preserve existing blocking behavior
         else:
             budget *= 0.80   # 1F: sound doesn't reach 2F; mild reduction only
 

@@ -111,10 +111,10 @@ def test_noise_budget_sleep_active_2f_floor(clean_ctx):
 
 
 def test_noise_budget_sleep_active_3f_floor(clean_ctx):
-    """2F sleep, 3F job → budget = 10 * 0.25 = 2.5 (Ethan audible in 2F ceiling)."""
+    """2F sleep, 3F job → budget = 10 * 0.20 = 2.0 (audible through 2F ceiling — blocked same as before)."""
     clean_ctx.quiet_hours_2f = True
     result = noise_budget(clean_ctx, "3F")
-    assert result == pytest.approx(2.5)
+    assert result == pytest.approx(2.0)
 
 
 def test_noise_budget_sleep_active_1f_floor(clean_ctx):
