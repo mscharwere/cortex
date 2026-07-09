@@ -207,7 +207,7 @@ def _render_prompt(
     r1_noise_radius_outcome = "PASS"
 
     impact = noise_impact(job, ctx)
-    budget = noise_budget(ctx)
+    budget = noise_budget(ctx, job.floor)
 
     # Build Jinja2 template variables
     env = Environment(undefined=StrictUndefined)

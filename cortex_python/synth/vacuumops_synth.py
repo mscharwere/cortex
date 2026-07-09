@@ -415,8 +415,10 @@ async def build_snapshot(
         # occupancy_gate_bypassed / bypass_reason are per-zone; set in evaluate_zone, not here.
     )
 
-    # Compute noise_budget once (§6.3 — so R0/R1/L1 don't recompute independently)
-    ctx.noise_budget = noise_budget(ctx)
+    # Compute noise_budget once for snapshot (§6.3 — so R0/R1/L1 don't recompute
+    # independently). "2F" is the conservative floor default for this snapshot-level
+    # cache; callers that know the operating floor pass job.floor directly.
+    ctx.noise_budget = noise_budget(ctx, "2F")
 
     if degraded:
         log.warning("snapshot_degraded", tick_id=tick_id)
