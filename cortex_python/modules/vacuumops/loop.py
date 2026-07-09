@@ -400,7 +400,7 @@ def _noise_acceptable_simple(job: VacuumJob, zone_id: int, ctx: ContextSnapshot)
     from cortex_python.modules.vacuumops.r1 import noise_radius_check
 
     impact = noise_impact(job, ctx)
-    budget = noise_budget(ctx)
+    budget = noise_budget(ctx, job.floor)
     if impact > budget:
         return False
     result, _, _ = noise_radius_check(job, zone_id, ctx)

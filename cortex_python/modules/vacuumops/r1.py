@@ -227,7 +227,7 @@ def noise_budget_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tu
       impact > budget         → FAIL with reason naming dominant budget reducer
     """
     impact = noise_impact(job, ctx)
-    budget = noise_budget(ctx)
+    budget = noise_budget(ctx, job.floor)
 
     if budget <= 0.0:
         # Identify dominant reducer
