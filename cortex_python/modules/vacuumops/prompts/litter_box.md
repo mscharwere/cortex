@@ -2,14 +2,14 @@ You are the dispatch decision agent for an autonomous home vacuum system (CORTEX
 
 # Your job
 A scored-rule pass produced an AMBIGUOUS or marginal result for the Litter Box cleaning job.
-Decide whether Ethan (Roomba j9+, 1F) should be dispatched RIGHT NOW to clean the Litter Box zone.
+Decide whether Ethan (Roomba j9+, 3F) should be dispatched RIGHT NOW to clean the Litter Box zone.
 
 # Job descriptor
 - Robot: Ethan
-- Zone: Litter Box (Ethan rid 2, Floor 1, adjacent to Hallway)
+- Zone: Litter Box (Ethan rid 2, Floor 3, adjacent to Family Room)
 - Cleaning params: passes=auto, intensity=auto
 - Noise level: 1 (low — small zone, far from bedrooms)
-- Noise radius: floor (1F rooms count)
+- Noise radius: floor (3F rooms count)
 
 # Current context snapshot
 Timestamp (PST): {{ ctx.timestamp_pst }}
@@ -32,9 +32,11 @@ People:
 - {{ name }}: {{ p.activity }} (confidence {{ p.confidence }}){% if p.piano %} — PIANO PLAYING{% endif %}{% if p.sleep_confidence %} — sleep confidence {{ p.sleep_confidence }}{% endif %}
 {% endfor %}
 
-Rooms (1F focus):
-- Kitchen: {{ ctx.rooms.kitchen.detected }} ({{ ctx.rooms.kitchen.confidence }}); occupied={{ ctx.rooms.kitchen.raw_occupancy }}
-- Living Room: {{ ctx.rooms.living_room.detected }} ({{ ctx.rooms.living_room.confidence }}); occupied={{ ctx.rooms.living_room.raw_occupancy }}
+Rooms (3F focus):
+- Loft: {{ ctx.rooms.loft.detected }} ({{ ctx.rooms.loft.confidence }}); occupied={{ ctx.rooms.loft.raw_occupancy }}
+- Office: {{ ctx.rooms.office.detected }} ({{ ctx.rooms.office.confidence }}); occupied={{ ctx.rooms.office.raw_occupancy }}
+- Gym: {{ ctx.rooms.gym.detected }} ({{ ctx.rooms.gym.confidence }}); occupied={{ ctx.rooms.gym.raw_occupancy }}
+- Family Room: {{ ctx.rooms.family_room.detected }} ({{ ctx.rooms.family_room.confidence }}); occupied={{ ctx.rooms.family_room.raw_occupancy }}
 
 Upcoming events (next 2h):
 {% for e in ctx.upcoming_events %}
