@@ -6,7 +6,7 @@ Decide whether Ethan (Roomba j9+, 3F) should be dispatched RIGHT NOW to clean th
 
 # Job descriptor
 - Robot: Ethan
-- Zone: Litter Box (Ethan rid 2, Floor 3, adjacent to Family Room)
+- Zone: Litter Box (Ethan rid 2, Floor 3, adjacent to Loft)
 - Cleaning params: passes=auto, intensity=auto
 - Noise level: 1 (low — small zone, far from bedrooms)
 - Noise radius: floor (3F rooms count)
@@ -36,7 +36,6 @@ Rooms (3F focus):
 - Loft: {{ ctx.rooms.loft.detected }} ({{ ctx.rooms.loft.confidence }}); occupied={{ ctx.rooms.loft.raw_occupancy }}
 - Office: {{ ctx.rooms.office.detected }} ({{ ctx.rooms.office.confidence }}); occupied={{ ctx.rooms.office.raw_occupancy }}
 - Gym: {{ ctx.rooms.gym.detected }} ({{ ctx.rooms.gym.confidence }}); occupied={{ ctx.rooms.gym.raw_occupancy }}
-- Family Room: {{ ctx.rooms.family_room.detected }} ({{ ctx.rooms.family_room.confidence }}); occupied={{ ctx.rooms.family_room.raw_occupancy }}
 
 Upcoming events (next 2h):
 {% for e in ctx.upcoming_events %}
