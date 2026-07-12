@@ -329,14 +329,20 @@ async def build_snapshot(
             degraded = True
 
     # ── Rooms ─────────────────────────────────────────────────────────────────
+    # Every room in _TRACKED_ROOMS must be present in ctx.rooms so Jinja2
+    # templates (e.g. {{ ctx.rooms.loft.detected }}) never hit StrictUndefined.
+    # Rooms without HA sensors (e.g. 3F: loft, office, gym) previously returned
+    # None from _fetch_room_activity and were silently skipped — now they get a
+    # safe default so the template layer always has a complete mapping.
+    _room_default = RoomActivity(detected="unknown", confidence=0.0, raw_occupancy=False)
     rooms: dict[str, RoomActivity] = {}
     for room in _TRACKED_ROOMS:
         try:
             room_activity = await _fetch_room_activity(ha_adapter, room)
-            if room_activity is not None:
-                rooms[room] = room_activity
+            rooms[room] = room_activity if room_activity is not None else _room_default
         except Exception as exc:
             log.warning("room_activity_fetch_failed", room=room, error=str(exc))
+            rooms[room] = _room_default
             degraded = True
 
     # ── Robots ────────────────────────────────────────────────────────────────
