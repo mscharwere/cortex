@@ -267,10 +267,14 @@ def _render_prompt(
     zone_meta = resolve_zone_meta(zone_id, ctx)
     zone_score = ctx.zone_scores.get(zone_id)
 
+    # Resolve zone label for template (StrictUndefined requires all {{ }} vars present)
+    zone_label = ctx.zone_info[zone_id].label if zone_id in ctx.zone_info else str(zone_id)
+
     # Render
     tmpl = env.from_string(prompt_template)
     rendered = tmpl.render(
         ctx=CtxView(),
+        zone=zone_label,
         time_since_last_clean=time_since_last_clean,
         r1_zone_active_use_outcome=r1_zone_active_use_outcome,
         r1_floor_clearance_outcome=r1_floor_clearance_outcome,
