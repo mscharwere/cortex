@@ -60,8 +60,8 @@ class L1Decision(BaseModel):
     reason: str
     defer_until_hint: str | None = None
     # Cleaning parameters (dispatch params spec)
-    passes: Literal["auto", "single", "double"] | None = None
-    intensity: Literal["auto", "normal", "high"] | None = None
+    passes: Literal["auto", "one", "two"] | None = None
+    intensity: Literal["auto", "eco", "perf"] | None = None
     params_reason: str | None = None  # ≤120 chars
 
 

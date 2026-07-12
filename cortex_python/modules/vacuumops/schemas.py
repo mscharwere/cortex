@@ -205,8 +205,8 @@ class ZoneDecisionDetail:
     l1_decision: str | None = None  # "dispatch" | "defer"
     l1_reason: str | None = None
     l1_defer_until_hint: str | None = None
-    l1_passes: str | None = None  # "auto" | "single" | "double"
-    l1_intensity: str | None = None  # "auto" | "normal" | "high"
+    l1_passes: str | None = None  # "auto" | "one" | "two"
+    l1_intensity: str | None = None  # "auto" | "eco" | "perf"
     l1_params_reason: str | None = None
 
 
