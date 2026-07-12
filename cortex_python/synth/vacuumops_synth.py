@@ -10,7 +10,7 @@ Fetches:
 
 Computes:
   - noise_budget (§6.3) — stored as ctx.noise_budget
-  - quiet_hours_1f / quiet_hours_2f — derived flags
+  - quiet_hours_1f / quiet_hours_2f — sourced from sensor.home_context.attributes.quiet_hours
 
 Graceful degradation per spec §8.5:
   - HA WS down: use safe defaults, mark ctx.degraded = True
@@ -77,12 +77,6 @@ _ROBOT_ENTITY_MAP: dict[str, dict[str, str]] = {
     },
 }
 
-# Quiet-hours windows (PST — compared after converting ctx.timestamp to PST)
-_QUIET_HOURS_1F_START = 22  # 10 PM
-_QUIET_HOURS_1F_END = 7  # 7 AM
-_QUIET_HOURS_2F_START = 21  # 9 PM
-_QUIET_HOURS_2F_END = 8  # 8 AM
-
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
     try:
@@ -96,16 +90,6 @@ def _safe_int(val: Any, default: int = 0) -> int:
         return int(val)
     except (TypeError, ValueError):
         return default
-
-
-def _is_quiet_1f(now_pst_hour: int) -> bool:
-    """True if current PST hour is within quiet 1F window (10 PM – 7 AM)."""
-    return now_pst_hour >= _QUIET_HOURS_1F_START or now_pst_hour < _QUIET_HOURS_1F_END
-
-
-def _is_quiet_2f(now_pst_hour: int) -> bool:
-    """True if current PST hour is within quiet 2F window (9 PM – 8 AM)."""
-    return now_pst_hour >= _QUIET_HOURS_2F_START or now_pst_hour < _QUIET_HOURS_2F_END
 
 
 async def _fetch_person_activity(ha_adapter: HARestAdapter, name: str) -> PersonActivity:
@@ -291,12 +275,6 @@ async def build_snapshot(
     """
     now = datetime.now(tz=UTC)
 
-    # PST hour for quiet-hours flags
-    import pytz
-
-    pst = pytz.timezone("America/Los_Angeles")
-    now_pst_hour = now.astimezone(pst).hour
-
     # ── Zone scores + display metadata (HomeOps) — must succeed or tick skipped ─
     # §8.5: "HomeOps get_zone_scores fails → skip this tick entirely."
     # get_zone_data() now also returns unit_dry_runs (dict[robot → bool]).
@@ -381,16 +359,15 @@ async def build_snapshot(
         calendar_degraded = True
 
     # ── Quiet-hours flags ─────────────────────────────────────────────────────
-    quiet_hours_1f = _is_quiet_1f(now_pst_hour)
-    quiet_hours_2f = _is_quiet_2f(now_pst_hour)
-
-    # Check if any 2F bedroom is currently sleeping
-    sleep_rooms = ("master_bedroom", "carlos_room", "upper_hall")
-    for room_key in sleep_rooms:
-        room_act = rooms.get(room_key)
-        if room_act and room_act.detected == "sleeping":
-            quiet_hours_2f = True
-            break
+    # Both flags sourced from sensor.home_context.attributes.quiet_hours.
+    # home_context is the canonical authority — avoids CORTEX time-window drift
+    # from HA's own quiet-hours logic (confirmed divergence: home_context.quiet_hours=false
+    # while CORTEX computed quiet_hours_2f=true at 9:22 PM, blocking a 100-dirt dispatch).
+    # Degraded case (home={}): defaults to False — fail-open is acceptable; home_context
+    # unavailability is already marked ctx.degraded=True above.
+    _hc_quiet = bool(home.get("quiet_hours", False))
+    quiet_hours_1f = _hc_quiet
+    quiet_hours_2f = _hc_quiet
 
     # ── Assemble snapshot ─────────────────────────────────────────────────────
     ctx = ContextSnapshot(
