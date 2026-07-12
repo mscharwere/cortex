@@ -51,6 +51,13 @@ _L1_CACHE_TTL = 600  # 10 minutes
 # PST timezone offset (UTC-7 during DST, UTC-8 otherwise — Carlos uses "PST" year-round)
 _PST = UTC  # timestamps rendered as UTC; UI renders PST; loop renders PST in prompts
 
+# Backward-compat vocabulary mapping for Redis-cached L1 decisions produced before the
+# vocab-alignment deploy (PR #32). Old vocabulary: "single"/"double" for passes,
+# "normal"/"high" for intensity. New vocabulary: "one"/"two" and "eco"/"perf".
+# Safe to remove once the L1 cache TTL window (600s / 10 min) has passed post-deploy.
+_PASSES_COMPAT = {"single": "one", "double": "two"}
+_INTENSITY_COMPAT = {"normal": "eco", "high": "perf"}
+
 
 class L1Decision(BaseModel):
     """Pydantic schema for L1 LLM response. Spec §7.3."""
@@ -60,8 +67,8 @@ class L1Decision(BaseModel):
     reason: str
     defer_until_hint: str | None = None
     # Cleaning parameters (dispatch params spec)
-    passes: Literal["auto", "single", "double"] | None = None
-    intensity: Literal["auto", "normal", "high"] | None = None
+    passes: Literal["auto", "one", "two"] | None = None
+    intensity: Literal["auto", "eco", "perf"] | None = None
     params_reason: str | None = None  # ≤120 chars
 
 
@@ -84,6 +91,10 @@ def resolve_params(job: VacuumJob, l1: L1Decision | None) -> tuple[str, str, str
         return default_passes, default_intensity, "default"
     p = l1.passes or default_passes
     i = l1.intensity or default_intensity
+    # Coerce stale Redis-cached decisions that used the old L1 vocabulary.
+    # See _PASSES_COMPAT / _INTENSITY_COMPAT at module level.
+    p = _PASSES_COMPAT.get(p, p)
+    i = _INTENSITY_COMPAT.get(i, i)
     src = (
         "l1"
         if (l1.passes and l1.intensity)

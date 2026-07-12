@@ -23,8 +23,8 @@ Time since last clean: {{ time_since_last_clean }}
 - Occupancy gate relaxed this run: {{ occupancy_gate_bypassed }}{% if occupancy_gate_bypassed %} — reason: {{ bypass_reason }}{% endif %}
 
 **How to use this:**
-- If the house is empty (`home_empty = true`), dispatch freely on cleaning merit alone — there is no one to disturb. Prefer `normal` intensity unless the dirtiness signal is strong, so that if someone returns mid-run the noise is modest.
-- If the gate was relaxed for a single non-Elena occupant (`single_person_low_disruption`), keep the run quiet and efficient: this is a low-disruption zone whose own room is clear, and someone is home elsewhere. Favor `single` pass + `normal` intensity unless the signal clearly justifies more.
+- If the house is empty (`home_empty = true`), dispatch freely on cleaning merit alone — there is no one to disturb. Prefer `eco` intensity unless the dirtiness signal is strong, so that if someone returns mid-run the noise is modest.
+- If the gate was relaxed for a single non-Elena occupant (`single_person_low_disruption`), keep the run quiet and efficient: this is a low-disruption zone whose own room is clear, and someone is home elsewhere. Favor `one` pass + `eco` intensity unless the signal clearly justifies more.
 - If the gate was NOT relaxed (`occupancy_gate_bypassed = false`), occupancy was already clear by the normal rules — choose params on cleaning merit alone.
 
 People:
@@ -72,8 +72,8 @@ NEVER override R0 results (those are hard gates already evaluated upstream).
   "confidence": 0.0–1.0,
   "reason": "one-sentence justification grounded in the context above",
   "defer_until_hint": "optional PST timestamp or relative descriptor; null if dispatch",
-  "passes": "auto" | "single" | "double" | null,
-  "intensity": "auto" | "normal" | "high" | null,
+  "passes": "auto" | "one" | "two" | null,
+  "intensity": "auto" | "eco" | "perf" | null,
   "params_reason": "≤120 chars explaining the cleaning parameter choice" | null
 }
 
@@ -99,21 +99,21 @@ After deciding dispatch vs. defer, if dispatching, also choose two parameters:
 
 `passes` controls how many times the robot covers the floor.
 - `auto` lets the robot's Dirt Detect sensor decide per-spot. Safe default when the dirt is unevenly distributed or unpredictable.
-- `single` is a deliberate one-pass for light, even soil. Fast, low noise, low battery.
-- `double` is a deliberate two-pass for heavy, ground-in, or sticky soil where a second pass meaningfully helps.
+- `one` is a deliberate one-pass for light, even soil. Fast, low noise, low battery.
+- `two` is a deliberate two-pass for heavy, ground-in, or sticky soil where a second pass meaningfully helps.
 
 `intensity` controls suction power.
 - `auto` lets the floor sensor scale suction to surface type. Right answer when the zone is mixed surface or you're unsure.
-- `normal` is quieter and saves battery on hard floors with light dust.
-- `high` is for embedded debris on carpet or persistent fine particulate on hard floor — but it is noticeably louder and drains battery faster.
+- `eco` is quieter and saves battery on hard floors with light dust.
+- `perf` is for embedded debris on carpet or persistent fine particulate on hard floor — but it is noticeably louder and drains battery faster.
 
 Reason about the physics: heavier suction helps when debris is dense or embedded; a second pass helps when one pass clearly won't lift everything; `auto` is the right answer when you don't have strong evidence either way. Litter granules on hard floor behave differently than pet hair on carpet; cat litter near the box is a localized dense deposit, not a whole-zone problem.
 
 **Output**
 
 If dispatching, include in your JSON:
-- `passes`: one of `auto | single | double`
-- `intensity`: one of `auto | normal | high`
+- `passes`: one of `auto | one | two`
+- `intensity`: one of `auto | eco | perf`
 - `params_reason`: ≤120 chars explaining the choice in plain language
 
 If deferring, set `passes`, `intensity`, and `params_reason` to `null`.
