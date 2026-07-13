@@ -37,7 +37,7 @@ Rooms (2F focus):
 - Master Bedroom: {{ ctx.rooms.master_bedroom.detected }} ({{ ctx.rooms.master_bedroom.confidence }}); occupied={{ ctx.rooms.master_bedroom.raw_occupancy }}; door_open={{ ctx.rooms.master_bedroom.door_open }}
 - Upper Hallway: {{ ctx.rooms.upper_hallway.detected }} ({{ ctx.rooms.upper_hallway.confidence }}); occupied={{ ctx.rooms.upper_hallway.raw_occupancy }}
 - Carlitos Room: {{ ctx.rooms.carlitos_room.detected }} ({{ ctx.rooms.carlitos_room.confidence }}); occupied={{ ctx.rooms.carlitos_room.raw_occupancy }}; door_open={{ ctx.rooms.carlitos_room.door_open }}
-- Kids Table Area: {{ ctx.rooms.kids_table_area.detected }} ({{ ctx.rooms.kids_table_area.confidence }}); occupied={{ ctx.rooms.kids_table_area.raw_occupancy }}
+- Kids Table Area: {{ ctx.rooms.kids_table_area.detected }} ({{ ctx.rooms.kids_table_area.confidence }}); occupied={{ ctx.rooms.kids_table_area.raw_occupancy }}; door_open={{ ctx.rooms.master_bedroom.door_open }} (shares master bedroom gate)
 - Daniel's Room: {{ ctx.rooms.daniel_room.detected }} ({{ ctx.rooms.daniel_room.confidence }}); occupied={{ ctx.rooms.daniel_room.raw_occupancy }}; door_open={{ ctx.rooms.daniel_room.door_open }}
 
 Upcoming events (next 2h):
