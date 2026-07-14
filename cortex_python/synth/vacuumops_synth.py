@@ -77,6 +77,16 @@ _ROBOT_ENTITY_MAP: dict[str, dict[str, str]] = {
     },
 }
 
+# Explicit room → HA entity overrides for door gate sensors.
+# Add an entry whenever a room's door sensor doesn't follow the
+# binary_sensor.{room}_door naming convention.
+_DOOR_ENTITY_MAP: dict[str, str] = {
+    "carlitos_room":   "binary_sensor.sam_carlitos_room_door_gate",
+    "daniel_room":     "binary_sensor.sam_daniel_s_room_door_gate",
+    "master_bathroom": "binary_sensor.sam_master_bathroom_door_gate",
+    "master_bedroom":  "binary_sensor.sam_master_bedroom_door_gate",
+}
+
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
     try:
@@ -144,9 +154,10 @@ async def _fetch_room_activity(ha_adapter: HARestAdapter, room: str) -> RoomActi
         detected = "active" if raw_occupancy else "idle"
         confidence = 0.5
 
-    # Door sensor — binary_sensor.{room}_door (None if unavailable)
+    # Door sensor — look up entity via override map first, fall back to convention.
     door_open: bool | None = None
-    door_state = await ha_adapter.get_entity_state(f"binary_sensor.{room}_door")
+    door_entity = _DOOR_ENTITY_MAP.get(room, f"binary_sensor.{room}_door")
+    door_state = await ha_adapter.get_entity_state(door_entity)
     if door_state is not None and door_state.get("state") not in ("unavailable", "unknown", None):
         door_open = door_state.get("state", "off").lower() in ("on", "true", "open")
 
