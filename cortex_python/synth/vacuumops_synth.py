@@ -133,8 +133,20 @@ async def _fetch_room_activity(ha_adapter: HARestAdapter, room: str) -> RoomActi
     occ_state = await ha_adapter.get_entity_state(occupancy_id)
     act_state = await ha_adapter.get_entity_state(activity_id)
 
+    # Door sensor fetched unconditionally — must not be gated on occupancy/activity
+    # availability. Rooms without occupancy sensors (e.g. Carlitos Room) would
+    # otherwise bypass the door-closed gate entirely (confirmed bug: 2026-07-17).
+    door_open: bool | None = None
+    door_entity = _DOOR_ENTITY_MAP.get(room, f"binary_sensor.{room}_door")
+    door_state = await ha_adapter.get_entity_state(door_entity)
+    if door_state is not None and door_state.get("state") not in ("unavailable", "unknown", None):
+        door_open = door_state.get("state", "off").lower() in ("on", "true", "open")
+
     if occ_state is None and act_state is None:
-        return None  # Both unavailable — skip this room
+        # No occupancy data — but surface door state if available so the door gate fires.
+        if door_open is not None:
+            return RoomActivity(detected="unknown", confidence=0.0, raw_occupancy=False, door_open=door_open)
+        return None
 
     raw_occupancy = False
     if occ_state is not None:
@@ -153,13 +165,6 @@ async def _fetch_room_activity(ha_adapter: HARestAdapter, room: str) -> RoomActi
         # Only occupancy available — infer
         detected = "active" if raw_occupancy else "idle"
         confidence = 0.5
-
-    # Door sensor — look up entity via override map first, fall back to convention.
-    door_open: bool | None = None
-    door_entity = _DOOR_ENTITY_MAP.get(room, f"binary_sensor.{room}_door")
-    door_state = await ha_adapter.get_entity_state(door_entity)
-    if door_state is not None and door_state.get("state") not in ("unavailable", "unknown", None):
-        door_open = door_state.get("state", "off").lower() in ("on", "true", "open")
 
     return RoomActivity(
         detected=detected,
