@@ -64,11 +64,7 @@ def test_zone_active_use_pass_idle(litter_box_job):
 # Zone 21 = Living Room (room_key="living_room") — a proper room zone with a sensor
 _ROOM_ZONE_ID = 21
 _ROOM_ZONE_INFO = ZoneInfo(
-    label="Living Room",
-    display="1F Living Room",
-    unit_id=1,
-    floor="1F",
-    room_key="living_room",
+    label="Living Room", display="1F Living Room", unit_id=1, floor="1F", room_key="living_room"
 )
 
 
@@ -329,11 +325,7 @@ async def test_run_r1_floor_not_clear_no_l1(mock_redis):
     ctx = make_snapshot()
     ctx.zone_scores[23] = 75.0
     ctx.zone_info[23] = ZoneInfo(
-        label="Litter Box",
-        display="1F Litter Box",
-        unit_id=1,
-        floor="1F",
-        room_key=None,
+        label="Litter Box", display="1F Litter Box", unit_id=1, floor="1F", room_key=None
     )
     ctx.rooms["kitchen"] = make_room("cooking", raw_occupancy=True)
     result, gate, reason = await run_r1(job, 23, ctx, mock_redis)

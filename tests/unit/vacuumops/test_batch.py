@@ -19,7 +19,7 @@ from cortex_python.modules.vacuumops.schemas import ZoneOutcome
 from tests.unit.vacuumops.conftest import make_snapshot
 
 _LITTER_BOX = 14  # Ethan 3F Litter Box (Ethan3FLitterBoxJob, robot="ethan")
-_LOFT = 15  # Ethan 3F Loft (Ethan3FRoomsJob, robot="ethan") — used in bundle tests
+_LOFT = 15        # Ethan 3F Loft (Ethan3FRoomsJob, robot="ethan") — used in bundle tests
 
 
 def make_dispatch_outcome(
