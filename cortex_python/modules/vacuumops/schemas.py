@@ -31,6 +31,23 @@ class ZoneMeta:
     # NEW (spec §1.1): HA room-level occupancy sensor for the zone's parent room.
     # Already exists in HomeOps DB/API (migration 014); was previously unused by CORTEX.
     # Used in Override 2 to resolve floor-level → room-level occupancy check.
+    last_mopped_at: datetime | None = None
+    # Mop-cadence gate (mop.py): last time this zone completed a mission with the
+    # mop on. Source: HomeOps vac_zone_cleanliness.last_mopped_at (migration
+    # 20260809000000). None = never mopped → schedule arm fires immediately.
+    mop_requested_at: datetime | None = None
+    # Signal arm of the mop gate: an explicit request for a wet pass, set by any
+    # producer (HA automation, MCP tool, UI). Cleared by HomeOps once satisfied.
+    mop_tracking_available: bool = False
+    # Positive feature-detection signal from HomeOps. Defaults to FALSE so that a
+    # HomeOps build predating the mop-tracking migration — which omits the field
+    # entirely — reads as "unavailable" and makes the gate decline.
+    #
+    # Without this, a null last_mopped_at is ambiguous between "never mopped"
+    # (maximally overdue → deep mop) and "the column does not exist yet". On a
+    # cortex-before-homeops deploy that ambiguity would fire an immediate deep
+    # mop across every Saros 1F zone on the first tick. Absence of a value is not
+    # a safe detection mechanism; this is the positive signal instead.
     child_zones: list[int] = field(default_factory=list)
     # child_zones: reverse index of contained_by — computed by homeops_adapter each tick
 
@@ -230,6 +247,11 @@ class DecisionEntry:
     # only when tier_reached == "L1"; minimum confidence across zones (worst-case)
     dry_run: bool
     dispatched_at: str | None = None  # ISO8601 PST; null on SKIP
+    mop: bool = False
+    # Batch-level mop decision (mop.py). Batch-level rather than per-zone because
+    # mop intensity is a unit-level HA setting applied once per mission.
+    mop_intensity: str | None = None  # HA value; None when mop is False
+    mop_reason: str | None = None  # which arm fired: "signal:..." | "schedule:..." etc.
 
 
 # ── Internal loop types ───────────────────────────────────────────────────────
@@ -279,3 +301,35 @@ class BatchEntry:
     # "l1" | "mixed" | "default" — how passes/intensity were resolved
     params_reason: str | None = None
     # 1-sentence rationale from L1; None when source == "default"
+
+
+@dataclass
+class MopZoneNeed:
+    """Per-zone result of the mop-cadence gate. Internal to mop.py.
+
+    A zone "needs" a mop when any one of the three arms of the locked
+    2026-07-03 design fires: signal, 7-day schedule, or score threshold.
+    """
+
+    zone: int
+    needed: bool
+    arm: str | None = None  # "signal" | "schedule" | "score" | None
+    reason: str = ""  # human-readable, lands in the decision log
+    deep: bool = False  # True → deep mop; False → light. See mop.py intensity mapping.
+    days_since_mopped: float | None = None  # None = never mopped
+
+
+@dataclass
+class MopDecision:
+    """Batch-level mop decision for one robot's dispatch.
+
+    Resolved at the robot boundary (not per zone) because mop intensity is a
+    unit-level HA setting: `select.saros_10r_mop_intensity` is applied once
+    before `vacuum.send_command`, so every zone in a batch is mopped or none is.
+    """
+
+    mop: bool
+    intensity: str | None = None  # HA value: slight|low|medium|moderate|high|extreme
+    reason: str = "off:not_enabled"
+    triggering_zones: list[int] = field(default_factory=list)
+    # zones whose own need caused the mop; the rest of the batch rides along

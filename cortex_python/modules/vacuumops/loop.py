@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from cortex_python.adapters.litellm_client import build_litellm_client
 from cortex_python.config.settings import Settings
-from cortex_python.modules.vacuumops.config import VacuumOpsConfig
+from cortex_python.modules.vacuumops.config import VacuumOpsConfig, build_vacuumops_config
 from cortex_python.modules.vacuumops.jobs import (
     Ethan3FLitterBoxJob,
     Ethan3FRoomsJob,
@@ -48,6 +48,7 @@ from cortex_python.modules.vacuumops.jobs import (
     VacuumJob,
 )
 from cortex_python.modules.vacuumops.l1 import L1Decision, resolve_params, resolve_zone_meta, run_l1
+from cortex_python.modules.vacuumops.mop import resolve_batch_mop
 from cortex_python.modules.vacuumops.r0 import _ZONE_COOLDOWN_KEY as _R0_ZONE_COOLDOWN_KEY
 from cortex_python.modules.vacuumops.r0 import run_r0
 from cortex_python.modules.vacuumops.r1 import _ROBOT_COOLDOWN_KEY as _R1_ROBOT_COOLDOWN_KEY
@@ -57,6 +58,7 @@ from cortex_python.modules.vacuumops.schemas import (
     ContextSnapshot,
     DecisionEntry,
     DropRecord,
+    MopDecision,
     ZoneDecisionDetail,
     ZoneOutcome,
 )
@@ -431,6 +433,18 @@ def _job_for_zone(zone_id: int) -> VacuumJob:
     raise ValueError(f"zone_id={zone_id} not found in any active job")
 
 
+def _job_for_zone_or_none(zone_id: int) -> VacuumJob | None:
+    """Non-raising variant of _job_for_zone, for callers that degrade gracefully.
+
+    The mop gate uses this: an unmapped zone should cost that zone its mop
+    evaluation, not abort the whole dispatch that R0/R1 already approved.
+    """
+    for job in ACTIVE_JOBS:
+        if zone_id in job.zones:
+            return job
+    return None
+
+
 def _zone_display(zone_id: int, ctx: ContextSnapshot) -> str:
     """Return the display label for a zone_id, falling back to str(zone_id)."""
     info = ctx.zone_info.get(zone_id)
@@ -552,14 +566,21 @@ async def dispatch_batch(
     homeops_adapter: Any,
     vacuumops_cfg: VacuumOpsConfig,
     dry_run: bool,
+    mop_decision: MopDecision | None = None,
 ) -> dict:
     """Issue a single POST /api/vacuum/trigger with zones[] for the full batch.
 
     Per §10.1: one call per robot per tick, regardless of batch size.
     Dry-run: skip the HomeOps call; still log.
 
+    mop_decision comes from the mop-cadence gate (mop.py) and applies to the
+    whole batch — mop intensity is a unit-level HA setting, so the mission runs
+    wet or dry as a unit. None means "no mop" (the pre-gate behaviour).
+
     Returns the HomeOps response dict (or a synthetic dry-run echo).
     """
+    mop = mop_decision.mop if mop_decision else False
+    mop_intensity = mop_decision.intensity if mop_decision else None
     primary_zones = [e for e in batch if not e.bundled]
     tier_reached = "R1"  # default; override if any zone was L1-decided
     for entry in primary_zones:
@@ -574,6 +595,9 @@ async def dispatch_batch(
         "tick_id": tick_id,
         "decision_tier": tier_reached,
         "reason": reason,
+        "mop": mop,
+        "mop_intensity": mop_intensity,
+        "mop_reason": mop_decision.reason if mop_decision else None,
     }
 
     zones_payload = [
@@ -597,11 +621,15 @@ async def dispatch_batch(
             robot=robot,
             zones=[_zone_display(e.zone, ctx) for e in batch],
             tick_id=tick_id,
+            mop=mop,
+            mop_intensity=mop_intensity,
         )
         return {
             "ha_dispatched": False,
             "dry_run_echo": True,
             "zones": zones_payload,
+            "mop": mop,
+            "mop_intensity": mop_intensity,
         }
 
     result = await homeops_adapter.trigger_vacuum(
@@ -609,12 +637,16 @@ async def dispatch_batch(
         zones=zones_payload,
         trigger_metadata=trigger_metadata,
         dry_run=False,
+        mop=mop,
+        mop_intensity=mop_intensity,
     )
     log.info(
         "dispatch_batch_sent",
         robot=robot,
         zones=[_zone_display(e.zone, ctx) for e in batch],
         tick_id=tick_id,
+        mop=mop,
+        mop_intensity=mop_intensity,
         result=result,
     )
     return result
@@ -673,12 +705,16 @@ async def persist_decision(
     db_session_factory: async_sessionmaker[AsyncSession],
     dry_run: bool,
     l1_results: dict[tuple[str, int], Any] | None = None,
+    mop_decision: MopDecision | None = None,
 ) -> None:
     """Write the decision to BOTH:
     1. CORTEX-internal decision_log table (SQLAlchemy async session)
     2. HomeOps vac_decisions via POST /api/decisions/vacuumops
 
     If HomeOps call fails, log the error but do NOT abort the loop tick.
+
+    mop_decision is recorded even when it resolves to False, so the log answers
+    "why was this run dry?" as readily as "why was it wet?".
 
     Spec: §8.3, §7.4
     """
@@ -776,6 +812,9 @@ async def persist_decision(
         l1_confidence=l1_confidence,
         dry_run=dry_run,
         dispatched_at=dispatched_at,
+        mop=mop_decision.mop if mop_decision else False,
+        mop_intensity=mop_decision.intensity if mop_decision else None,
+        mop_reason=mop_decision.reason if mop_decision else None,
     )
 
     # 1. Write to CORTEX decision_log
@@ -915,9 +954,13 @@ async def vacuumops_loop(settings: Settings) -> None:
     homeops_adapter = HomeOpsAdapter(settings)
 
     # Module config — dry-run sourced from settings
-    vacuumops_cfg = VacuumOpsConfig(dry_run=settings.cortex_vacuumops_dry_run)
+    vacuumops_cfg = build_vacuumops_config(settings)
 
-    log.info("vacuumops_loop.started", dry_run=vacuumops_cfg.dry_run)
+    log.info(
+        "vacuumops_loop.started",
+        dry_run=vacuumops_cfg.dry_run,
+        mop_enabled=vacuumops_cfg.mop_enabled,
+    )
 
     ctx: ContextSnapshot | None = None
     l1_timeout_count = 0  # consecutive ticks with L1 timeout
@@ -1045,6 +1088,23 @@ async def vacuumops_loop(settings: Settings) -> None:
                 # (e.g. a new unit added before the column migration runs).
                 effective_dry_run = unit_dry_runs.get(robot, True)
 
+                # Mop-cadence gate (mop.py). Resolved AFTER batch assembly because
+                # the mop is a modifier on the dispatch we have already decided to
+                # make, and because mop intensity is a unit-level HA setting — the
+                # whole batch runs wet or dry together. Deterministic, no L1.
+                mop_job_map: dict[int, VacuumJob] = {}
+                for batch_entry in batch:
+                    owning_job = _job_for_zone_or_none(batch_entry.zone)
+                    if owning_job is not None:
+                        mop_job_map[batch_entry.zone] = owning_job
+
+                mop_decision = resolve_batch_mop(
+                    batch=batch,
+                    ctx=ctx,
+                    job_for_zone=mop_job_map,
+                    cfg=vacuumops_cfg,
+                )
+
                 await persist_decision(
                     tick_id=tick_id,
                     robot=robot,
@@ -1055,6 +1115,7 @@ async def vacuumops_loop(settings: Settings) -> None:
                     db_session_factory=db_session_factory,
                     dry_run=effective_dry_run,
                     l1_results=per_robot_l1.get(robot, {}),
+                    mop_decision=mop_decision,
                 )
 
                 if batch:
@@ -1068,6 +1129,7 @@ async def vacuumops_loop(settings: Settings) -> None:
                             homeops_adapter=homeops_adapter,
                             vacuumops_cfg=vacuumops_cfg,
                             dry_run=effective_dry_run,
+                            mop_decision=mop_decision,
                         )
                         await _set_per_zone_cooldowns(batch, ACTIVE_JOBS, redis_client)
                         await _set_robot_cooldown(robot, vacuumops_cfg, redis_client)

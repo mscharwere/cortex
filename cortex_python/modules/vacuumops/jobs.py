@@ -69,6 +69,27 @@ class VacuumJob:
     # If True, R1 runs door_open_check: reads room.door_open from ContextSnapshot.
     # Graceful degradation: door_open=None (sensor missing) → treat as open → PASS.
 
+    # ── Mop-cadence gate (mop.py) ────────────────────────────────────────────
+    # Locked design, 2026-07-03 (D14–D18): "Mop intelligence (Saros only):
+    # signal → schedule (7-day) → score threshold → off. Intensity: light/deep."
+    #
+    # The mop is a MODIFIER on a vacuum dispatch, not a separate job: the robot
+    # physically cannot mop without driving the same segments it vacuums, so a
+    # separate mop job would double-dispatch and fight the per-robot cooldown.
+    # These fields therefore tune an existing job's wet/dry behaviour.
+    mop_enabled: bool = False
+    # Master switch. False → this job never mops (Braava and the iRobot units are
+    # excluded from the CORTEX mop model entirely; the HomeOps route ignores mop
+    # fields for non-Roborock kinds anyway).
+    mop_cadence_days: float = 7.0
+    # Schedule arm: mop when this many days have elapsed since last_mopped_at.
+    mop_score_threshold: float = 80.0
+    # Score arm: a zone this dirty earns a wet pass regardless of the schedule.
+    # Deliberately well above dispatch_threshold (50) — a routine vacuum-eligible
+    # zone should not trigger a mop on score alone.
+    mop_deep_after_days: float = 14.0
+    # Intensity arm: a zone overdue by this much gets a deep mop rather than light.
+
 
 @dataclass
 class Ethan3FLitterBoxJob(VacuumJob):
@@ -157,6 +178,11 @@ class Saros1FLitterBoxJob(VacuumJob):
     """Saros 10R (1F) Litter Box — Petivity-signal-driven.
 
     Full floor clearance: defers when anyone is on 1F.
+
+    Vacuum-only by design: mop_enabled stays False. Dragging a wet pad through
+    litter scatter makes a paste and fouls the pad for the rest of the mission,
+    which would then be smeared across the room zones. The original design
+    scoped the mop model to room zones for this reason.
     """
 
     job_id: str = "saros_1f_litter_box"
@@ -196,10 +222,18 @@ class Saros1FRoomsJob(VacuumJob):
     """Saros 10R (1F) room zones — decay-driven.
 
     Full floor clearance: defers when anyone is on 1F.
+
+    This is the ONLY job with the mop gate enabled. Per the locked 2026-07-03
+    design the mop model is Saros-only, and within the Saros it is room-zones
+    only — the litter box stays vacuum-only (see Saros1FLitterBoxJob).
     """
 
     job_id: str = "saros_1f_rooms"
     robot: str = "saros"
+    mop_enabled: bool = True
+    mop_cadence_days: float = 7.0
+    mop_score_threshold: float = 80.0
+    mop_deep_after_days: float = 14.0
     zones: list[int] = field(
         default_factory=lambda: [19, 20, 21, 22, 24, 25]
         # Kitchen=19, Bathroom=20, Living Room=21, Hallway=22, Prep Area=24, Dining Table=25

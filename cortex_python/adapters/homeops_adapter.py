@@ -14,6 +14,8 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §11
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import httpx
 import structlog
 
@@ -48,6 +50,24 @@ _ZONE_LABEL_TO_ROOM_KEY: dict[str, str | None] = {
 }
 
 log = structlog.get_logger()
+
+
+def _parse_ts(raw: object) -> datetime | None:
+    """Parse a HomeOps timestamp field into a datetime, tolerantly.
+
+    HomeOps serializes these as ISO8601 (often with a trailing "Z", which
+    fromisoformat only accepts natively from 3.11+; normalized here anyway so a
+    format change cannot take down the tick). Any unparseable value degrades to
+    None, which the mop gate treats as "unknown" rather than "due".
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        log.warning("homeops_timestamp_parse_failed", raw=raw)
+        return None
+
 
 # HomeOps adapter timeout
 _HOMEOPS_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
@@ -174,6 +194,16 @@ class HomeOpsAdapter:
                 occupancy_sensor=z.get("occupancy_sensor"),
                 # Spec §1.1: already in HomeOps API response (migration 014); was dropped here.
                 # Now mapped so Override 2 can resolve the zone's parent room key.
+                # Mop-cadence gate inputs (HomeOps migration 20260809000000).
+                # last_mopped_at drives the 7-day schedule arm; mop_requested_at is
+                # the signal arm. Both None when HomeOps predates the migration,
+                # which the gate treats as degraded → declines to mop.
+                last_mopped_at=_parse_ts(z.get("last_mopped_at")),
+                mop_requested_at=_parse_ts(z.get("mop_requested_at")),
+                # Absent on any HomeOps build predating the mop-tracking
+                # migration → False → the gate declines rather than reading a
+                # null last_mopped_at as "never mopped, deep-mop everything".
+                mop_tracking_available=bool(z.get("mop_tracking_available", False)),
                 child_zones=[],  # populated below
             )
 
@@ -190,6 +220,8 @@ class HomeOpsAdapter:
         zones: list[dict],
         trigger_metadata: dict,
         dry_run: bool,
+        mop: bool = False,
+        mop_intensity: str | None = None,
     ) -> dict:
         """POST /api/vacuum/trigger — dispatch a multi-zone mission.
 
@@ -199,19 +231,33 @@ class HomeOpsAdapter:
             "zones": [...],
             "trigger_source": "cortex",
             "trigger_metadata": {...},
-            "dry_run": false
+            "dry_run": false,
+            "mop": true,             # Roborock only, omitted when false
+            "mop_intensity": "low"   # required by HomeOps when mop is true
           }
+
+        mop/mop_intensity come from the mop-cadence gate (modules/vacuumops/mop.py).
+        They are omitted entirely when mop is False: HomeOps defaults mop to false
+        and sends "off" to HA, and the fields are ignored for non-Roborock units,
+        so sending them unconditionally would only add noise to iRobot dispatches.
 
         Returns the HomeOps response dict.
         Raises httpx.HTTPStatusError on 4xx/5xx — caller handles per §10.2.
         """
-        payload = {
+        payload: dict = {
             "robot": robot,
             "zones": zones,
             "trigger_source": "cortex",
             "trigger_metadata": trigger_metadata,
             "dry_run": dry_run,
         }
+        if mop:
+            if not mop_intensity:
+                # HomeOps returns 422 for mop=true without an intensity. Fail here
+                # with a clear message rather than surfacing an opaque HTTP error.
+                raise ValueError("mop_intensity is required when mop is True")
+            payload["mop"] = True
+            payload["mop_intensity"] = mop_intensity
         async with self._client() as client:
             r = await client.post("/api/vacuum/trigger", json=payload)
             r.raise_for_status()
@@ -254,6 +300,11 @@ class HomeOpsAdapter:
             "l1_confidence": entry.l1_confidence,
             "dry_run": entry.dry_run,
             "dispatched_at": entry.dispatched_at,
+            # Mop-cadence gate outcome — makes wet-vs-dry inspectable through
+            # get_vacuum_decisions alongside the existing dispatch reasoning.
+            "mop": entry.mop,
+            "mop_intensity": entry.mop_intensity,
+            "mop_reason": entry.mop_reason,
         }
         try:
             async with self._client() as client:

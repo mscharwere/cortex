@@ -99,11 +99,11 @@ def noise_budget(ctx: ContextSnapshot, floor: str) -> float:
     )
     if sleep_active:
         if floor == "2F":
-            budget *= 0.05   # block — running in the bedrooms
+            budget *= 0.05  # block — running in the bedrooms
         elif floor == "3F":
-            budget *= 0.20   # audible through 2F ceiling — preserve existing blocking behavior
+            budget *= 0.20  # audible through 2F ceiling — preserve existing blocking behavior
         else:
-            budget *= 0.80   # 1F: sound doesn't reach 2F; mild reduction only
+            budget *= 0.80  # 1F: sound doesn't reach 2F; mild reduction only
 
     # Quiet hours 1F (10pm–7am) — daytime suppression for 1F jobs
     if ctx.quiet_hours_1f:

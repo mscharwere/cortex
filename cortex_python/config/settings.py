@@ -48,6 +48,13 @@ class Settings(BaseSettings):
 
     # ── VacuumOps module ───────────────────────────────────────────────────────
     cortex_vacuumops_dry_run: bool = False  # Global override removed; per-unit DB flags control
+    cortex_vacuumops_mop_enabled: bool = False
+    # Master kill switch for the mop-cadence gate (modules/vacuumops/mop.py).
+    # Defaults to FALSE — opt-in, not opt-out. Wet-mopping is a physical action on
+    # Carlos's floors that runs unsupervised; the safe posture for a missing or
+    # misspelled env var is "do not mop". When False the gate still evaluates
+    # every arm and logs what it WOULD have done (shadow mode), so the decision
+    # trail can be reviewed before the Saros is allowed to run wet.
 
     # ── Service behaviour ──────────────────────────────────────────────────────
     log_level: str = "INFO"
