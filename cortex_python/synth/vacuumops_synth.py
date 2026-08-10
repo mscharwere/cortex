@@ -81,10 +81,10 @@ _ROBOT_ENTITY_MAP: dict[str, dict[str, str]] = {
 # Add an entry whenever a room's door sensor doesn't follow the
 # binary_sensor.{room}_door naming convention.
 _DOOR_ENTITY_MAP: dict[str, str] = {
-    "carlitos_room":   "binary_sensor.sam_carlitos_room_door_gate",
-    "daniel_room":     "binary_sensor.sam_daniel_s_room_door_gate",
+    "carlitos_room": "binary_sensor.sam_carlitos_room_door_gate",
+    "daniel_room": "binary_sensor.sam_daniel_s_room_door_gate",
     "master_bathroom": "binary_sensor.sam_master_bathroom_door_gate",
-    "master_bedroom":  "binary_sensor.sam_master_bedroom_door_gate",
+    "master_bedroom": "binary_sensor.sam_master_bedroom_door_gate",
 }
 
 
@@ -145,7 +145,9 @@ async def _fetch_room_activity(ha_adapter: HARestAdapter, room: str) -> RoomActi
     if occ_state is None and act_state is None:
         # No occupancy data — but surface door state if available so the door gate fires.
         if door_open is not None:
-            return RoomActivity(detected="unknown", confidence=0.0, raw_occupancy=False, door_open=door_open)
+            return RoomActivity(
+                detected="unknown", confidence=0.0, raw_occupancy=False, door_open=door_open
+            )
         return None
 
     raw_occupancy = False

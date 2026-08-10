@@ -25,13 +25,13 @@ def test_resolve_params_all_l1():
         decision="dispatch",
         confidence=0.9,
         reason="zone clear, heavy litter load",
-        passes="double",
-        intensity="high",
+        passes="two",
+        intensity="perf",
         params_reason="Two heavy Oliver visits — double pass + high suction warranted",
     )
     passes, intensity, src = resolve_params(job, l1)
-    assert passes == "double"
-    assert intensity == "high"
+    assert passes == "two"
+    assert intensity == "perf"
     assert src == "l1"
 
 
@@ -42,12 +42,12 @@ def test_resolve_params_mixed():
         decision="dispatch",
         confidence=0.75,
         reason="moderate dirtiness, floor type clear",
-        passes="single",
+        passes="one",
         intensity=None,
         params_reason="Light load — single pass sufficient",
     )
     passes, intensity, src = resolve_params(job, l1)
-    assert passes == "single"
+    assert passes == "one"
     # intensity falls back to job.cleaning_params default ("auto")
     assert intensity == job.cleaning_params.get("intensity", "auto")
     assert src == "mixed"
@@ -89,8 +89,8 @@ def test_assemble_batch_uses_l1_results():
         decision="dispatch",
         confidence=0.88,
         reason="zone clear, heavy litter",
-        passes="double",
-        intensity="high",
+        passes="two",
+        intensity="perf",
         params_reason="Heavy Oliver deposit — double pass + high suction",
     )
     l1_results = {(job.job_id, _LITTER_BOX): l1_decision}
@@ -100,8 +100,8 @@ def test_assemble_batch_uses_l1_results():
     assert len(batch) == 1
     entry = batch[0]
     assert entry.params_source == "l1"
-    assert entry.passes == "double"
-    assert entry.intensity == "high"
+    assert entry.passes == "two"
+    assert entry.intensity == "perf"
     assert entry.params_reason == "Heavy Oliver deposit — double pass + high suction"
     assert entry.bundled is False
 
@@ -148,8 +148,8 @@ def test_assemble_batch_bundled_uses_default():
         decision="dispatch",
         confidence=0.9,
         reason="clear loft",
-        passes="double",
-        intensity="high",
+        passes="two",
+        intensity="perf",
         params_reason="Should be ignored for bundled zone",
     )
     l1_results = {(job.job_id, _LOFT): l1_decision}
