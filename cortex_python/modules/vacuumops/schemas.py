@@ -38,6 +38,16 @@ class ZoneMeta:
     mop_requested_at: datetime | None = None
     # Signal arm of the mop gate: an explicit request for a wet pass, set by any
     # producer (HA automation, MCP tool, UI). Cleared by HomeOps once satisfied.
+    mop_tracking_available: bool = False
+    # Positive feature-detection signal from HomeOps. Defaults to FALSE so that a
+    # HomeOps build predating the mop-tracking migration — which omits the field
+    # entirely — reads as "unavailable" and makes the gate decline.
+    #
+    # Without this, a null last_mopped_at is ambiguous between "never mopped"
+    # (maximally overdue → deep mop) and "the column does not exist yet". On a
+    # cortex-before-homeops deploy that ambiguity would fire an immediate deep
+    # mop across every Saros 1F zone on the first tick. Absence of a value is not
+    # a safe detection mechanism; this is the positive signal instead.
     child_zones: list[int] = field(default_factory=list)
     # child_zones: reverse index of contained_by — computed by homeops_adapter each tick
 

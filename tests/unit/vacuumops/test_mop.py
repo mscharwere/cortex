@@ -54,8 +54,13 @@ def make_meta(
     mop_requested: bool = False,
     floor_type: str | None = "laminate",
     never_mopped: bool = False,
+    tracking_available: bool = True,
 ) -> ZoneMeta:
-    """Build a ZoneMeta with mop state relative to _NOW."""
+    """Build a ZoneMeta with mop state relative to _NOW.
+
+    tracking_available defaults True = "HomeOps has shipped migration
+    20260809000000". Set it False to simulate a cortex-before-homeops deploy.
+    """
     last_mopped = (
         None
         if never_mopped or last_mopped_days_ago is None
@@ -67,7 +72,17 @@ def make_meta(
         floor_type=floor_type,
         last_mopped_at=last_mopped,
         mop_requested_at=_NOW - timedelta(hours=2) if mop_requested else None,
+        mop_tracking_available=tracking_available,
     )
+
+
+def enabled_cfg(**kw) -> VacuumOpsConfig:
+    """VacuumOpsConfig with the mop gate switched ON.
+
+    The production default is OFF (opt-in), so any test asserting that a mop
+    actually happens must enable it explicitly.
+    """
+    return VacuumOpsConfig(mop_enabled=True, **kw)
 
 
 def ctx_with(metas: list[ZoneMeta], scores: dict[int, float] | None = None):
@@ -124,6 +139,41 @@ class TestEvaluateMopNeed:
         assert need.needed is False
         assert need.reason == "job_mop_disabled"
 
+    def test_mop_tracking_unavailable_declines_instead_of_deep_mopping(self):
+        """cortex-deployed-before-homeops must NOT read as 'never mopped'.
+
+        Without feature detection, last_mopped_at=None is indistinguishable
+        from a genuinely never-mopped zone, and the schedule arm treats that as
+        maximally overdue — firing an immediate DEEP mop across every Saros 1F
+        zone on the first tick after deploy.
+        """
+        job = Saros1FRoomsJob()
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, never_mopped=True, tracking_available=False)]
+        )
+        need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
+        assert need.needed is False
+        assert need.reason == "mop_tracking_unavailable"
+        assert need.deep is False
+
+    def test_tracking_unavailable_beats_every_arm(self):
+        """Not just the schedule arm — a pending signal must not slip through."""
+        job = Saros1FRoomsJob()
+        ctx = ctx_with(
+            [
+                make_meta(
+                    _KITCHEN,
+                    never_mopped=True,
+                    mop_requested=True,
+                    tracking_available=False,
+                )
+            ],
+            scores={_KITCHEN: 99.0},
+        )
+        need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
+        assert need.needed is False
+        assert need.reason == "mop_tracking_unavailable"
+
     def test_missing_metadata_declines_rather_than_guesses(self):
         """Degraded context: get_zone_metadata() returns {} on failure.
 
@@ -139,7 +189,9 @@ class TestEvaluateMopNeed:
     # ── arm 1: signal ──
     def test_signal_arm_fires_on_request(self):
         job = Saros1FRoomsJob()
-        ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=1.0, mop_requested=True)])
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=1.0, mop_requested=True)]
+        )
         need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
         assert need.needed is True
         assert need.arm == "signal"
@@ -164,7 +216,9 @@ class TestEvaluateMopNeed:
 
     def test_schedule_arm_does_not_fire_before_cadence(self):
         job = Saros1FRoomsJob()
-        ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=6.9)], scores={_KITCHEN: 10.0})
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=6.9)], scores={_KITCHEN: 10.0}
+        )
         need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
         assert need.needed is False
         assert need.reason.startswith("not_due:")
@@ -182,7 +236,9 @@ class TestEvaluateMopNeed:
     # ── arm 3: score threshold ──
     def test_score_arm_fires_above_threshold(self):
         job = Saros1FRoomsJob()  # mop_score_threshold = 80
-        ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=2.0)], scores={_KITCHEN: 85.0})
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=2.0)], scores={_KITCHEN: 85.0}
+        )
         need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
         assert need.needed is True
         assert need.arm == "score"
@@ -191,7 +247,9 @@ class TestEvaluateMopNeed:
     def test_score_arm_ignores_merely_dispatch_eligible_zone(self):
         """dispatch_threshold is 50; a zone at 60 is vacuum-eligible but not mop-eligible."""
         job = Saros1FRoomsJob()
-        ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=1.0)], scores={_KITCHEN: 60.0})
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=1.0)], scores={_KITCHEN: 60.0}
+        )
         need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
         assert need.needed is False
 
@@ -213,7 +271,7 @@ class TestEvaluateMopNeed:
 class TestResolveBatchMop:
     def test_empty_batch_is_off(self):
         ctx = ctx_with([])
-        d = resolve_batch_mop([], ctx, {}, VacuumOpsConfig(), _NOW)
+        d = resolve_batch_mop([], ctx, {}, enabled_cfg(), _NOW)
         assert d.mop is False
         assert d.reason == "off:empty_batch"
 
@@ -222,9 +280,57 @@ class TestResolveBatchMop:
         job = Saros1FRoomsJob()
         ctx = ctx_with([make_meta(_KITCHEN, never_mopped=True)])
         cfg = VacuumOpsConfig(mop_enabled=False)
-        d = resolve_batch_mop(batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), cfg, _NOW)
+        d = resolve_batch_mop(
+            batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), cfg, _NOW
+        )
         assert d.mop is False
-        assert d.reason == "off:module_disabled"
+        assert d.reason.startswith("off:disabled")
+
+    def test_kill_switch_shadow_mode_records_what_it_would_have_done(self):
+        """The switch exists so the trail can be reviewed BEFORE going wet.
+
+        A flat "off:module_disabled" with no per-zone reasoning would make the
+        switch useless for that purpose, so the arms must still be evaluated.
+        """
+        job = Saros1FRoomsJob()
+        ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=9.0)])
+        d = resolve_batch_mop(
+            batch_of(_KITCHEN),
+            ctx,
+            job_map([_KITCHEN], job),
+            VacuumOpsConfig(mop_enabled=False),
+            _NOW,
+        )
+        assert d.mop is False
+        assert d.intensity is None  # never dispatched
+        # The real reasoning survives into the decision log.
+        assert "would:" in d.reason
+        assert "schedule:9.0d" in d.reason
+        assert d.triggering_zones == [_KITCHEN]
+
+    def test_shadow_mode_distinguishes_would_mop_from_not_due(self):
+        job = Saros1FRoomsJob()
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=1.0)], scores={_KITCHEN: 10.0}
+        )
+        d = resolve_batch_mop(
+            batch_of(_KITCHEN),
+            ctx,
+            job_map([_KITCHEN], job),
+            VacuumOpsConfig(mop_enabled=False),
+            _NOW,
+        )
+        assert d.reason == "off:disabled(not_due)"
+
+    def test_mop_reason_fits_the_homeops_column(self):
+        """vac_decisions.mop_reason is VARCHAR(64); a longer string would truncate."""
+        job = Saros1FRoomsJob()
+        ctx = ctx_with([make_meta(_KITCHEN, never_mopped=True, floor_type=None)])
+        for cfg in (VacuumOpsConfig(mop_enabled=False), enabled_cfg()):
+            d = resolve_batch_mop(
+                batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), cfg, _NOW
+            )
+            assert len(d.reason) <= 64
 
     def test_no_zone_due_is_off(self):
         job = Saros1FRoomsJob()
@@ -232,7 +338,9 @@ class TestResolveBatchMop:
             [make_meta(_KITCHEN, last_mopped_days_ago=1.0)],
             scores={_KITCHEN: 20.0},
         )
-        d = resolve_batch_mop(batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), VacuumOpsConfig(), _NOW)
+        d = resolve_batch_mop(
+            batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), enabled_cfg(), _NOW
+        )
         assert d.mop is False
         assert d.reason == "off:no_zone_due"
 
@@ -248,7 +356,9 @@ class TestResolveBatchMop:
             scores={_KITCHEN: 60.0, _LIVING_ROOM: 60.0, _HALLWAY: 60.0},
         )
         zones = [_KITCHEN, _LIVING_ROOM, _HALLWAY]
-        d = resolve_batch_mop(batch_of(*zones), ctx, job_map(zones, job), VacuumOpsConfig(), _NOW)
+        d = resolve_batch_mop(
+            batch_of(*zones), ctx, job_map(zones, job), enabled_cfg(), _NOW
+        )
         assert d.mop is True
         # Only the genuinely-due zone is credited as triggering; the rest ride along.
         assert d.triggering_zones == [_KITCHEN]
@@ -259,12 +369,16 @@ class TestResolveBatchMop:
         ctx = ctx_with(
             [
                 make_meta(_KITCHEN, last_mopped_days_ago=9.0),  # schedule
-                make_meta(_LIVING_ROOM, last_mopped_days_ago=1.0, mop_requested=True),  # signal
+                make_meta(
+                    _LIVING_ROOM, last_mopped_days_ago=1.0, mop_requested=True
+                ),  # signal
             ],
             scores={_KITCHEN: 60.0, _LIVING_ROOM: 60.0},
         )
         zones = [_KITCHEN, _LIVING_ROOM]
-        d = resolve_batch_mop(batch_of(*zones), ctx, job_map(zones, job), VacuumOpsConfig(), _NOW)
+        d = resolve_batch_mop(
+            batch_of(*zones), ctx, job_map(zones, job), enabled_cfg(), _NOW
+        )
         assert d.mop is True
         assert d.reason.startswith("signal")
         assert set(d.triggering_zones) == {_KITCHEN, _LIVING_ROOM}
@@ -274,7 +388,11 @@ class TestResolveBatchMop:
         ctx = ctx_with([make_meta(_KITCHEN, never_mopped=True)])
         # _LIVING_ROOM deliberately absent from the job map
         d = resolve_batch_mop(
-            batch_of(_KITCHEN, _LIVING_ROOM), ctx, job_map([_KITCHEN], job), VacuumOpsConfig(), _NOW
+            batch_of(_KITCHEN, _LIVING_ROOM),
+            ctx,
+            job_map([_KITCHEN], job),
+            enabled_cfg(),
+            _NOW,
         )
         assert d.mop is True
 
@@ -286,13 +404,17 @@ class TestIntensityMapping:
     def test_light_maps_to_low(self):
         job = Saros1FRoomsJob()
         ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=8.0)])  # due, not deep
-        d = resolve_batch_mop(batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), VacuumOpsConfig(), _NOW)
+        d = resolve_batch_mop(
+            batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), enabled_cfg(), _NOW
+        )
         assert d.intensity == "low"
 
     def test_deep_maps_to_high(self):
         job = Saros1FRoomsJob()
         ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=20.0)])  # deep
-        d = resolve_batch_mop(batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), VacuumOpsConfig(), _NOW)
+        d = resolve_batch_mop(
+            batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), enabled_cfg(), _NOW
+        )
         assert d.intensity == "high"
 
     def test_extremes_of_ha_scale_are_never_used(self):
@@ -306,13 +428,19 @@ class TestIntensityMapping:
         job = Saros1FRoomsJob()
         ctx = ctx_with(
             [
-                make_meta(_KITCHEN, last_mopped_days_ago=30.0, floor_type="tile"),  # deep
-                make_meta(_LIVING_ROOM, last_mopped_days_ago=1.0, floor_type="hardwood"),
+                make_meta(
+                    _KITCHEN, last_mopped_days_ago=30.0, floor_type="tile"
+                ),  # deep
+                make_meta(
+                    _LIVING_ROOM, last_mopped_days_ago=1.0, floor_type="hardwood"
+                ),
             ],
             scores={_KITCHEN: 60.0, _LIVING_ROOM: 60.0},
         )
         zones = [_KITCHEN, _LIVING_ROOM]
-        d = resolve_batch_mop(batch_of(*zones), ctx, job_map(zones, job), VacuumOpsConfig(), _NOW)
+        d = resolve_batch_mop(
+            batch_of(*zones), ctx, job_map(zones, job), enabled_cfg(), _NOW
+        )
         assert d.mop is True
         assert d.intensity == "low"
         assert "capped_light" in d.reason
@@ -328,8 +456,57 @@ class TestIntensityMapping:
             scores={_KITCHEN: 60.0, _HALLWAY: 60.0},
         )
         zones = [_KITCHEN, _HALLWAY]
-        d = resolve_batch_mop(batch_of(*zones), ctx, job_map(zones, job), VacuumOpsConfig(), _NOW)
+        d = resolve_batch_mop(
+            batch_of(*zones), ctx, job_map(zones, job), enabled_cfg(), _NOW
+        )
         assert d.triggering_zones == [_KITCHEN]
+        assert d.intensity == "low"
+
+    def test_null_floor_type_caps_to_light(self):
+        """floor_type is nullable with no enforced backfill.
+
+        An unknown surface cannot be shown to tolerate a deep pass, so it must
+        fail CLOSED — consistent with the module's stance everywhere else.
+        """
+        job = Saros1FRoomsJob()
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=30.0, floor_type=None)]
+        )
+        d = resolve_batch_mop(
+            batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), enabled_cfg(), _NOW
+        )
+        assert d.mop is True
+        assert d.intensity == "low"
+        assert "capped_light" in d.reason
+
+    def test_null_floor_type_on_a_rider_zone_still_caps(self):
+        job = Saros1FRoomsJob()
+        ctx = ctx_with(
+            [
+                make_meta(_KITCHEN, last_mopped_days_ago=30.0, floor_type="tile"),
+                make_meta(_HALLWAY, last_mopped_days_ago=0.5, floor_type=None),
+            ],
+            scores={_KITCHEN: 60.0, _HALLWAY: 60.0},
+        )
+        zones = [_KITCHEN, _HALLWAY]
+        d = resolve_batch_mop(
+            batch_of(*zones), ctx, job_map(zones, job), enabled_cfg(), _NOW
+        )
+        assert d.intensity == "low"
+
+    def test_zone_missing_from_metadata_caps_to_light(self):
+        """Degraded context inside an otherwise-deep batch: unknown surface."""
+        job = Saros1FRoomsJob()
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=30.0, floor_type="tile")],
+            scores={_KITCHEN: 60.0, _HALLWAY: 60.0},
+        )
+        # _HALLWAY is in the batch but absent from zone_metadata entirely.
+        zones = [_KITCHEN, _HALLWAY]
+        d = resolve_batch_mop(
+            batch_of(*zones), ctx, job_map(zones, job), enabled_cfg(), _NOW
+        )
+        assert d.mop is True
         assert d.intensity == "low"
 
     def test_no_hardwood_leaves_deep_intact(self):
@@ -342,15 +519,19 @@ class TestIntensityMapping:
             scores={_KITCHEN: 60.0, _HALLWAY: 60.0},
         )
         zones = [_KITCHEN, _HALLWAY]
-        d = resolve_batch_mop(batch_of(*zones), ctx, job_map(zones, job), VacuumOpsConfig(), _NOW)
+        d = resolve_batch_mop(
+            batch_of(*zones), ctx, job_map(zones, job), enabled_cfg(), _NOW
+        )
         assert d.intensity == "high"
         assert "capped_light" not in d.reason
 
     def test_mapping_is_configurable(self):
         job = Saros1FRoomsJob()
-        cfg = VacuumOpsConfig(mop_intensity_light="medium", mop_intensity_deep="extreme")
+        cfg = enabled_cfg(mop_intensity_light="medium", mop_intensity_deep="extreme")
         ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=8.0)])
-        d = resolve_batch_mop(batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), cfg, _NOW)
+        d = resolve_batch_mop(
+            batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), cfg, _NOW
+        )
         assert d.intensity == "medium"
 
 
@@ -379,17 +560,100 @@ class TestJobScoping:
         assert Custom().mop_enabled is False
 
     def test_litter_box_in_batch_does_not_trigger_a_mop(self):
-        """Even bone dry and never mopped, the litter box must not go wet."""
-        ctx = ctx_with([make_meta(_LITTER_BOX, never_mopped=True)], scores={_LITTER_BOX: 99.0})
+        """Even bone dry and never mopped, the litter box must not go wet.
+
+        Gate explicitly ENABLED so this proves job scoping, not the kill switch.
+        """
+        ctx = ctx_with(
+            [make_meta(_LITTER_BOX, never_mopped=True)], scores={_LITTER_BOX: 99.0}
+        )
         d = resolve_batch_mop(
             batch_of(_LITTER_BOX),
             ctx,
             job_map([_LITTER_BOX], Saros1FLitterBoxJob()),
-            VacuumOpsConfig(),
+            enabled_cfg(),
             _NOW,
         )
         assert d.mop is False
         assert d.reason == "off:no_zone_due"
+
+
+# ── §7: settings wiring — env var all the way through to behaviour ──────────
+#
+# Regression guard for ARIIA finding 1: CORTEX_VACUUMOPS_MOP_ENABLED was
+# documented and the dataclass field existed, but nothing connected them —
+# loop.py constructed VacuumOpsConfig(dry_run=...) only, so the switch was dead.
+# The original tests missed it because they built VacuumOpsConfig directly.
+# These go through Settings and build_vacuumops_config instead.
+
+
+_REQUIRED_ENV = {
+    "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
+    "REDIS_URL": "redis://localhost:6379/0",
+    "CORTEX_SECRET_KEY": "test-secret",
+}
+
+
+def _settings_with(monkeypatch, **overrides):
+    from cortex_python.config.settings import Settings
+
+    for key, value in {**_REQUIRED_ENV, **overrides}.items():
+        monkeypatch.setenv(key, value)
+    # Ignore any repo-local .env so the test reflects the environment only.
+    return Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+class TestSettingsWiring:
+    def test_env_var_true_enables_the_gate(self, monkeypatch):
+        from cortex_python.modules.vacuumops.config import build_vacuumops_config
+
+        settings = _settings_with(monkeypatch, CORTEX_VACUUMOPS_MOP_ENABLED="true")
+        cfg = build_vacuumops_config(settings)
+        assert cfg.mop_enabled is True
+
+    def test_env_var_false_disables_the_gate(self, monkeypatch):
+        from cortex_python.modules.vacuumops.config import build_vacuumops_config
+
+        settings = _settings_with(monkeypatch, CORTEX_VACUUMOPS_MOP_ENABLED="false")
+        assert build_vacuumops_config(settings).mop_enabled is False
+
+    def test_unset_env_var_defaults_to_disabled(self, monkeypatch):
+        """Opt-in: wet-mopping runs unsupervised, so absent config must not mop."""
+        from cortex_python.modules.vacuumops.config import build_vacuumops_config
+
+        monkeypatch.delenv("CORTEX_VACUUMOPS_MOP_ENABLED", raising=False)
+        settings = _settings_with(monkeypatch)
+        assert build_vacuumops_config(settings).mop_enabled is False
+
+    def test_dry_run_still_wired(self, monkeypatch):
+        """Guard the pre-existing field against the same class of regression."""
+        from cortex_python.modules.vacuumops.config import build_vacuumops_config
+
+        settings = _settings_with(monkeypatch, CORTEX_VACUUMOPS_DRY_RUN="true")
+        assert build_vacuumops_config(settings).dry_run is True
+
+    def test_env_var_reaches_actual_mop_behaviour(self, monkeypatch):
+        """End to end: env var -> Settings -> config -> resolve_batch_mop outcome.
+
+        This is the assertion that would have failed on the original code.
+        """
+        from cortex_python.modules.vacuumops.config import build_vacuumops_config
+
+        job = Saros1FRoomsJob()
+        ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=9.0)])
+        args = (batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job))
+
+        off = build_vacuumops_config(
+            _settings_with(monkeypatch, CORTEX_VACUUMOPS_MOP_ENABLED="false")
+        )
+        assert resolve_batch_mop(*args, off, _NOW).mop is False
+
+        on = build_vacuumops_config(
+            _settings_with(monkeypatch, CORTEX_VACUUMOPS_MOP_ENABLED="true")
+        )
+        decision = resolve_batch_mop(*args, on, _NOW)
+        assert decision.mop is True
+        assert decision.intensity == "low"
 
 
 # ── §6: trigger_vacuum payload — the wiring the ticket was filed for ─────────
@@ -474,3 +738,97 @@ class TestTriggerVacuumPayload:
                 robot="saros", zones=[], trigger_metadata={}, dry_run=False, mop=True
             )
         assert sink == {}  # never reached the wire
+
+
+# ── §8: adapter parsing of the feature-detection flag ────────────────────────
+#
+# The guard for ARIIA finding 2 is only as good as its default. An older HomeOps
+# build omits mop_tracking_available entirely, and that absence must read as
+# False — not as a truthy missing-key surprise.
+
+
+class _ZonesResponse:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _ZonesClient:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url: str):
+        return _ZonesResponse(self._payload)
+
+
+def _adapter_returning(payload: dict):
+    from cortex_python.adapters.homeops_adapter import HomeOpsAdapter
+
+    adapter = HomeOpsAdapter.__new__(HomeOpsAdapter)
+    adapter._base_url = "http://homeops.test"  # type: ignore[attr-defined]
+    adapter._api_key = "test"  # type: ignore[attr-defined]
+    adapter._headers = {}  # type: ignore[attr-defined]
+    adapter._client = lambda: _ZonesClient(payload)  # type: ignore[method-assign]
+    return adapter
+
+
+class TestZoneMetadataMopParsing:
+    @pytest.mark.asyncio
+    async def test_absent_flag_defaults_to_false(self):
+        """Pre-migration HomeOps omits the field → must NOT be treated as tracked."""
+        adapter = _adapter_returning(
+            {"data": [{"id": _KITCHEN, "unit_id": 3, "floor_type": "tile"}]}
+        )
+        meta = await adapter.get_zone_metadata()
+        assert meta[_KITCHEN].mop_tracking_available is False
+        assert meta[_KITCHEN].last_mopped_at is None
+
+    @pytest.mark.asyncio
+    async def test_flag_and_timestamps_parsed_when_present(self):
+        adapter = _adapter_returning(
+            {
+                "data": [
+                    {
+                        "id": _KITCHEN,
+                        "unit_id": 3,
+                        "floor_type": "tile",
+                        "mop_tracking_available": True,
+                        "last_mopped_at": "2026-08-01T12:00:00Z",
+                        "mop_requested_at": None,
+                    }
+                ]
+            }
+        )
+        meta = await adapter.get_zone_metadata()
+        assert meta[_KITCHEN].mop_tracking_available is True
+        assert meta[_KITCHEN].last_mopped_at is not None
+        assert meta[_KITCHEN].last_mopped_at.year == 2026
+        assert meta[_KITCHEN].mop_requested_at is None
+
+    @pytest.mark.asyncio
+    async def test_unparseable_timestamp_degrades_to_none(self):
+        adapter = _adapter_returning(
+            {
+                "data": [
+                    {
+                        "id": _KITCHEN,
+                        "unit_id": 3,
+                        "mop_tracking_available": True,
+                        "last_mopped_at": "not-a-timestamp",
+                    }
+                ]
+            }
+        )
+        meta = await adapter.get_zone_metadata()
+        assert meta[_KITCHEN].last_mopped_at is None

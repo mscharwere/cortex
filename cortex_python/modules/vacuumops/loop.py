@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from cortex_python.adapters.litellm_client import build_litellm_client
 from cortex_python.config.settings import Settings
-from cortex_python.modules.vacuumops.config import VacuumOpsConfig
+from cortex_python.modules.vacuumops.config import VacuumOpsConfig, build_vacuumops_config
 from cortex_python.modules.vacuumops.jobs import (
     Ethan3FLitterBoxJob,
     Ethan3FRoomsJob,
@@ -954,9 +954,13 @@ async def vacuumops_loop(settings: Settings) -> None:
     homeops_adapter = HomeOpsAdapter(settings)
 
     # Module config — dry-run sourced from settings
-    vacuumops_cfg = VacuumOpsConfig(dry_run=settings.cortex_vacuumops_dry_run)
+    vacuumops_cfg = build_vacuumops_config(settings)
 
-    log.info("vacuumops_loop.started", dry_run=vacuumops_cfg.dry_run)
+    log.info(
+        "vacuumops_loop.started",
+        dry_run=vacuumops_cfg.dry_run,
+        mop_enabled=vacuumops_cfg.mop_enabled,
+    )
 
     ctx: ContextSnapshot | None = None
     l1_timeout_count = 0  # consecutive ticks with L1 timeout

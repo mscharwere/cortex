@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from cortex_python.config.settings import Settings
+
 
 @dataclass
 class VacuumOpsConfig:
@@ -65,7 +67,36 @@ class VacuumOpsConfig:
     # dirtiest zone.
     mop_deep_floor_type_blocklist: tuple[str, ...] = ("hardwood",)
 
-    # Master kill switch (env: CORTEX_VACUUMOPS_MOP_ENABLED). When False the gate
-    # evaluates and logs its reasoning but always resolves to mop=False, so the
-    # decision trail can be reviewed before letting the Saros run wet.
-    mop_enabled: bool = True
+    # Master kill switch. Sourced from Settings.cortex_vacuumops_mop_enabled
+    # (env: CORTEX_VACUUMOPS_MOP_ENABLED) and threaded in by loop.py — this
+    # default is only the fallback for direct construction in tests.
+    #
+    # Defaults to FALSE: opt-in, not opt-out. Wet-mopping is a physical action on
+    # real floors that runs unsupervised, so a missing or misspelled env var must
+    # fail to "do not mop".
+    #
+    # When False the gate still evaluates every arm and records what it WOULD
+    # have done (shadow mode, reason "off:disabled(would:...)"), so the decision
+    # trail can be reviewed before the Saros is allowed to run wet.
+    mop_enabled: bool = False
+
+
+def build_vacuumops_config(settings: Settings) -> VacuumOpsConfig:
+    """Map runtime Settings (env vars) onto the module config.
+
+    This exists as a named function rather than an inline expression in
+    vacuumops_loop() so the env-var -> behaviour path is directly testable.
+    The mop kill switch originally shipped unwired precisely because the
+    construction was a one-line expression buried in the loop: the field
+    existed, the env var was documented, and nothing connected them. Tests that
+    build VacuumOpsConfig directly cannot catch that class of bug — they have to
+    go through this function.
+
+    Every env-sourced field belongs here. If you add one to VacuumOpsConfig and
+    it is meant to be operator-controlled, wire it in this function and assert it
+    in tests/unit/vacuumops/test_mop.py::TestSettingsWiring.
+    """
+    return VacuumOpsConfig(
+        dry_run=settings.cortex_vacuumops_dry_run,
+        mop_enabled=settings.cortex_vacuumops_mop_enabled,
+    )

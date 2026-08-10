@@ -66,7 +66,7 @@ def test_resolve_params_default():
 
 
 _LITTER_BOX = 14  # Ethan 3F Litter Box (Ethan3FLitterBoxJob, robot="ethan")
-_LOFT = 15        # Ethan 3F Loft (Ethan3FRoomsJob, robot="ethan") — used in bundle tests
+_LOFT = 15  # Ethan 3F Loft (Ethan3FRoomsJob, robot="ethan") — used in bundle tests
 
 
 def test_assemble_batch_uses_l1_results():

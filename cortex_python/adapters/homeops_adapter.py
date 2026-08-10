@@ -200,6 +200,10 @@ class HomeOpsAdapter:
                 # which the gate treats as degraded → declines to mop.
                 last_mopped_at=_parse_ts(z.get("last_mopped_at")),
                 mop_requested_at=_parse_ts(z.get("mop_requested_at")),
+                # Absent on any HomeOps build predating the mop-tracking
+                # migration → False → the gate declines rather than reading a
+                # null last_mopped_at as "never mopped, deep-mop everything".
+                mop_tracking_available=bool(z.get("mop_tracking_available", False)),
                 child_zones=[],  # populated below
             )
 

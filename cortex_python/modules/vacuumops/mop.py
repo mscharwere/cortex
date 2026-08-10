@@ -47,14 +47,36 @@ which only affects which arm is *reported*, never whether the mop happens):
              (default 80, well above the dispatch threshold of 50). A merely
              vacuum-eligible zone does not earn a wet pass on score alone.
 
-DEGRADED CONTEXT
-----------------
-`ctx.zone_metadata` is best-effort: `get_zone_metadata()` returns `{}` on
-failure and the tick proceeds. When a zone's metadata is missing we cannot know
-when it was last mopped, so the gate declines to mop. A skipped mop costs one
-cadence cycle; an unwanted wet run on unknown state is the worse failure — the
-pad may be dirty, the floor may have just been mopped, and neither is
-recoverable within the tick.
+DEGRADED CONTEXT — three distinct "we don't know" cases, all fail closed
+------------------------------------------------------------------------
+A skipped mop costs one cadence cycle. An unwanted wet run on unknown state is
+not recoverable within the tick — the pad may be dirty, the floor may have just
+been mopped, someone may be about to walk on it. So every unknown declines.
+
+1. **Zone metadata missing.** `get_zone_metadata()` returns `{}` on failure and
+   the tick proceeds. Without metadata we cannot know when the zone was last
+   mopped → decline.
+
+2. **HomeOps predates the mop-tracking migration.** This is the dangerous one,
+   and it cannot be detected by absence: a null `last_mopped_at` means EITHER
+   "never mopped" (maximally overdue → deep mop) OR "the column does not exist".
+   Conflating them would fire an immediate deep mop across every Saros 1F zone
+   on the first tick of a cortex-before-homeops deploy. HomeOps therefore emits
+   a positive `mop_tracking_available` flag, which defaults to False here →
+   decline. Absence of a value is never used as the detection mechanism.
+
+3. **Unknown floor type.** `floor_type` is nullable with no enforced backfill.
+   An unknown surface cannot be shown to tolerate a deep pass, so it caps the
+   whole batch to light — see the floor-type cap in `resolve_batch_mop`.
+
+SHADOW MODE
+-----------
+`VacuumOpsConfig.mop_enabled` (env `CORTEX_VACUUMOPS_MOP_ENABLED`, default
+False) is an opt-in master switch. When it is off the gate still evaluates every
+arm and records what it WOULD have done — `off:disabled(would:...)` — because
+the point of the switch is to review the real decision trail before letting the
+Saros run wet. The switch is applied after the reasoning is computed, never as
+an early return.
 
 Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md
 """
@@ -78,6 +100,14 @@ from cortex_python.modules.vacuumops.schemas import (
 log = structlog.get_logger()
 
 _SECONDS_PER_DAY = 86400.0
+
+# HomeOps vac_decisions.mop_reason is VARCHAR(64) (migration 20260809000000).
+_MOP_REASON_MAX = 64
+
+
+def _clip(reason: str) -> str:
+    """Keep a decision reason inside the HomeOps column width."""
+    return reason if len(reason) <= _MOP_REASON_MAX else reason[: _MOP_REASON_MAX - 1] + "~"
 
 
 def _as_utc(ts: datetime) -> datetime:
@@ -127,6 +157,20 @@ def evaluate_mop_need(
         # Degraded context — decline rather than guess. See module docstring.
         log.warning("mop_zone_metadata_missing", zone_id=zone_id, job_id=job.job_id)
         return MopZoneNeed(zone=zone_id, needed=False, reason="metadata_unavailable")
+
+    if not meta.mop_tracking_available:
+        # HomeOps has not shipped the mop-tracking migration (or this zone predates
+        # it). last_mopped_at would read None, which the schedule arm treats as
+        # "never mopped" → maximally overdue → an immediate DEEP mop across every
+        # zone. That is exactly the wrong failure for an unsupervised wet run, so
+        # feature detection has to gate the arms rather than trusting a null.
+        log.warning(
+            "mop_tracking_unavailable",
+            zone_id=zone_id,
+            job_id=job.job_id,
+            hint="HomeOps migration 20260809000000 not deployed yet",
+        )
+        return MopZoneNeed(zone=zone_id, needed=False, reason="mop_tracking_unavailable")
 
     elapsed = days_since(meta.last_mopped_at, now)
     score = ctx.zone_scores.get(zone_id, 0.0)
@@ -207,9 +251,11 @@ def resolve_batch_mop(
     if not batch:
         return MopDecision(mop=False, reason="off:empty_batch")
 
-    if not cfg.mop_enabled:
-        return MopDecision(mop=False, reason="off:module_disabled")
-
+    # NOTE: the kill switch is deliberately NOT checked here. Every arm is
+    # evaluated first so that a disabled gate still produces a real decision
+    # trail (shadow mode) — the whole point of the switch is to review what the
+    # gate WOULD do before letting the Saros run wet. The switch is applied at
+    # the bottom, after the reasoning exists.
     needs: list[MopZoneNeed] = []
     for entry in batch:
         job = job_for_zone.get(entry.zone)
@@ -220,6 +266,8 @@ def resolve_batch_mop(
 
     due = [n for n in needs if n.needed]
     if not due:
+        if not cfg.mop_enabled:
+            return MopDecision(mop=False, reason="off:disabled(not_due)")
         return MopDecision(mop=False, reason="off:no_zone_due")
 
     # Report the highest-precedence arm that actually fired.
@@ -233,11 +281,18 @@ def resolve_batch_mop(
     # setting safe for the most water-sensitive surface it will touch — checked
     # across the WHOLE batch, not just the zones that triggered the mop.
     if deep:
+        # Fails CLOSED on unknown surfaces. floor_type is a nullable HomeOps
+        # column with no enforced backfill, and a missing ZoneMeta is possible
+        # under degraded context — in both cases we do not know what the robot is
+        # about to soak, so the conservative setting is the only defensible one.
+        # This matches the module's "unknown -> decline/conservative" stance
+        # everywhere else; treating unknown as not-hardwood would fail open.
         sensitive = [
             entry.zone
             for entry in batch
-            if (meta := ctx.zone_metadata.get(entry.zone)) is not None
-            and meta.floor_type in cfg.mop_deep_floor_type_blocklist
+            if (meta := ctx.zone_metadata.get(entry.zone)) is None
+            or meta.floor_type is None
+            or meta.floor_type in cfg.mop_deep_floor_type_blocklist
         ]
         if sensitive:
             deep = False
@@ -250,17 +305,30 @@ def resolve_batch_mop(
 
     intensity = cfg.mop_intensity_deep if deep else cfg.mop_intensity_light
 
+    if not cfg.mop_enabled:
+        # Shadow mode: the reasoning above is real and is recorded, but the
+        # dispatch stays dry. mop_reason is a VARCHAR(64) in HomeOps, so the
+        # composed string is clipped rather than risking a truncated write.
+        shadow = _clip(f"off:disabled(would:{reason}@{intensity})")
+        log.info(
+            "mop_decision_suppressed",
+            reason=shadow,
+            would_intensity=intensity,
+            triggering_zones=[n.zone for n in due],
+        )
+        return MopDecision(mop=False, reason=shadow, triggering_zones=[n.zone for n in due])
+
     decision = MopDecision(
         mop=True,
         intensity=intensity,
-        reason=reason,
+        reason=_clip(reason),
         triggering_zones=[n.zone for n in due],
     )
     log.info(
         "mop_decision",
         mop=True,
         intensity=intensity,
-        reason=reason,
+        reason=decision.reason,
         triggering_zones=decision.triggering_zones,
         deep=deep,
     )
