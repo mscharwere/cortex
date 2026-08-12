@@ -116,7 +116,6 @@ def test_noise_budget_quiet_hours_1f_does_not_affect_other_floors(clean_ctx):
     assert noise_budget(clean_ctx, "3F") == pytest.approx(10.0)
 
 
-
 def test_noise_budget_sleep_active_2f_floor(clean_ctx):
     """2F sleep, 2F job → budget = 10 * 0.05 = 0.5 (blocked — in the bedrooms)."""
     clean_ctx.quiet_hours_2f = True
