@@ -226,10 +226,18 @@ class Saros1FRoomsJob(VacuumJob):
     This is the ONLY job with the mop gate enabled. Per the locked 2026-07-03
     design the mop model is Saros-only, and within the Saros it is room-zones
     only — the litter box stays vacuum-only (see Saros1FLitterBoxJob).
+
+    door_check=True gates the Bathroom (zone 20), which has a real door that is
+    routinely shut — dispatching into it is mechanically futile. The flag is
+    job-wide but structurally affects the Bathroom only: door_open_check
+    no-ops to "treat as open" for any zone whose room_key is None (Prep Area)
+    or whose room has no mapped/resolvable door entity (Kitchen, Living Room,
+    Hallway, Dining Table — none of these has a binary_sensor.{room}_door in HA).
     """
 
     job_id: str = "saros_1f_rooms"
     robot: str = "saros"
+    door_check: bool = True
     mop_enabled: bool = True
     mop_cadence_days: float = 7.0
     mop_score_threshold: float = 80.0
@@ -259,6 +267,7 @@ class Saros1FRoomsJob(VacuumJob):
         default_factory=lambda: [
             "zone_active_use_check",
             "floor_clearance_check",
+            "door_open_check",
             "transit_pattern_lookahead",
             "noise_budget_check",
             "noise_radius_check",

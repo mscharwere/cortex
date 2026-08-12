@@ -43,9 +43,13 @@ def make_room(
     detected: str = "idle",
     confidence: float = 0.8,
     raw_occupancy: bool = False,
+    door_open: bool | None = None,
 ) -> RoomActivity:
     return RoomActivity(
-        detected=detected, confidence=confidence, raw_occupancy=raw_occupancy
+        detected=detected,
+        confidence=confidence,
+        raw_occupancy=raw_occupancy,
+        door_open=door_open,
     )
 
 

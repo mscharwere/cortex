@@ -34,7 +34,7 @@ People:
 
 Rooms (1F focus):
 {% for key, r in ctx.rooms.items() %}
-- {{ key }}: {{ r.detected }} ({{ r.confidence }}); occupied={{ r.raw_occupancy }}
+- {{ key }}: {{ r.detected }} ({{ r.confidence }}); occupied={{ r.raw_occupancy }}{% if r.door_open is not none %}; door_open={{ r.door_open }}{% endif %}
 {% endfor %}
 
 Upcoming events (next 2h):
