@@ -85,6 +85,15 @@ _DOOR_ENTITY_MAP: dict[str, str] = {
     "daniel_room": "binary_sensor.sam_daniel_s_room_door_gate",
     "master_bathroom": "binary_sensor.sam_master_bathroom_door_gate",
     "master_bedroom": "binary_sensor.sam_master_bedroom_door_gate",
+    # 1F Bathroom (Saros zone 20). The Z-Wave device exposes NINE binary_sensors
+    # for this one physical reed switch; the entity below is the Z-Wave JS
+    # "Door state (simple)" collapsed binary — device_class=door, on=open —
+    # which is the polarity door_open_check expects. Do NOT swap this for a
+    # "...window_door_is_closed" sibling: those are INVERTED (on=closed) and
+    # carry no device_class, so the gate would defer exactly when the door is
+    # open. Verified against live HA 2026-08-11 (204 transitions/7d, the open-
+    # and closed-family entities perfectly anti-correlated).
+    "bathroom": "binary_sensor.first_level_bathroom_door_sensor",
 }
 
 
