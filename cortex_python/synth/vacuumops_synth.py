@@ -288,17 +288,23 @@ async def build_snapshot(
     ha_adapter: HARestAdapter,
     homeops_adapter: HomeOpsAdapter,
     settings: Settings,
-) -> tuple[ContextSnapshot, dict[str, bool]]:
+) -> tuple[ContextSnapshot, dict[str, bool], bool]:
     """Build a ContextSnapshot for one loop tick.
 
     Fetches all required data, applies graceful degradation per §8.5.
     Raises if HomeOps zone scores are unavailable (caller skips tick).
 
     Returns:
-      (ctx, unit_dry_runs) where unit_dry_runs is dict[robot_name → dry_run bool].
-      robot_name is the lowercased unit nickname (e.g. "ethan", "sam").
-      unit_dry_runs is consumed by the loop to compute per-robot effective dry_run;
-      it is NOT stored on ContextSnapshot (avoids coupling schema to dispatch concerns).
+      (ctx, unit_dry_runs, live_mop_enabled)
+        unit_dry_runs is dict[robot_name → dry_run bool]. robot_name is the
+          lowercased unit nickname (e.g. "ethan", "sam"). Consumed by the loop
+          to compute per-robot effective dry_run.
+        live_mop_enabled is the mop-cadence gate's live, DB-backed kill switch
+          (HomeOps cortex_vacuumops_settings, replacing CORTEX_VACUUMOPS_MOP_ENABLED).
+          Already fail-closed to False by HomeOpsAdapter.get_vacuumops_mop_enabled()
+          on any read problem — nothing further to degrade here.
+      Neither is stored on ContextSnapshot (avoids coupling schema to
+      dispatch/module-config concerns) — both are consumed by the loop only.
     """
     now = datetime.now(tz=UTC)
 
@@ -317,6 +323,14 @@ async def build_snapshot(
     # Failure does NOT skip the tick — scores are the hard dependency.
     # get_zone_metadata() logs and returns {} on failure.
     zone_metadata = await homeops_adapter.get_zone_metadata()
+
+    # ── Mop-cadence gate kill switch (HomeOps, DB-backed) ─────────────────────
+    # Live read every tick — replaces the old CORTEX_VACUUMOPS_MOP_ENABLED env
+    # var, which only took effect at process start. Failure does NOT skip the
+    # tick (same reasoning as zone_metadata above); get_vacuumops_mop_enabled()
+    # fails closed to False on any unreachable/malformed/missing-field case, so
+    # there is nothing further to degrade here — the bool is already safe.
+    live_mop_enabled = await homeops_adapter.get_vacuumops_mop_enabled()
 
     # ── Home context ──────────────────────────────────────────────────────────
     home_state = await ha_adapter.get_entity_state("sensor.home_context")
@@ -435,4 +449,4 @@ async def build_snapshot(
     else:
         log.debug("snapshot_built", tick_id=tick_id, zone_count=len(zone_scores))
 
-    return ctx, unit_dry_runs
+    return ctx, unit_dry_runs, live_mop_enabled

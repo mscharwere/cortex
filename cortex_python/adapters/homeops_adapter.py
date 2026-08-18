@@ -1,9 +1,10 @@
 """HomeOps adapter for CORTEX VacuumOps.
 
 Calls:
-  GET  /api/vacuum/units          — parse zone scores from data[].zones[]
-  POST /api/vacuum/trigger        — dispatch a mission
-  POST /api/decisions/vacuumops   — log a decision entry (fire-and-forget)
+  GET  /api/vacuum/units             — parse zone scores from data[].zones[]
+  POST /api/vacuum/trigger           — dispatch a mission
+  POST /api/decisions/vacuumops      — log a decision entry (fire-and-forget)
+  GET  /api/cortex/vacuumops-settings — live mop-cadence gate kill switch (fail-closed)
 
 All calls use:
   Authorization: Bearer {settings.cortex_api_key}
@@ -152,6 +153,55 @@ class HomeOpsAdapter:
                     )
 
             return scores, zone_info, unit_dry_runs
+
+    async def get_vacuumops_mop_enabled(self) -> bool:
+        """Fetch the live, DB-backed mop-cadence gate kill switch from HomeOps.
+
+        GET /api/cortex/vacuumops-settings
+        Response: { data: { mop_enabled, mop_enabled_updated_at, mop_enabled_updated_by } }
+
+        Replaces the CORTEX_VACUUMOPS_MOP_ENABLED env var (formerly read once at
+        process start via Settings/VacuumOpsConfig). This is called fresh every
+        loop tick by vacuumops_synth.build_snapshot() — no separate cache/TTL on
+        this side. The adaptive tick interval (60-300s, see loop.next_interval)
+        is the only staleness bound, matching the existing unit-level dry_run
+        read path (get_zone_data(), same adapter, no caching either).
+
+        Fail-CLOSED on every ambiguity, mirroring the module's stance everywhere
+        else (mop.py module docstring, "DEGRADED CONTEXT" section): wet-mopping
+        is a physical action on real floors that runs unsupervised, so anything
+        other than a confirmed `true` resolves to False.
+          - Network error / timeout / non-2xx status  -> False (logged)
+          - Malformed JSON / missing "data" object     -> False (logged)
+          - "mop_enabled" key absent or not a bool     -> False (logged)
+          - Confirmed True or False                    -> that value, no log noise
+
+        Never raises — a HomeOps outage on this read must not take down the tick
+        (zone scores are the only hard dependency; see build_snapshot's §8.5
+        docstring). This mirrors get_zone_metadata()'s try/except-and-degrade
+        shape below, not get_zone_data()'s raise-on-failure shape — zone scores
+        are load-bearing for the whole tick, this flag is not.
+        """
+        try:
+            async with self._client() as client:
+                r = await client.get("/api/cortex/vacuumops-settings")
+                r.raise_for_status()
+                body = r.json()
+        except Exception as exc:
+            log.warning("homeops_get_vacuumops_settings_failed", error=str(exc))
+            return False
+
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, dict):
+            log.warning("homeops_vacuumops_settings_malformed", body=body)
+            return False
+
+        value = data.get("mop_enabled")
+        if not isinstance(value, bool):
+            log.warning("homeops_vacuumops_settings_mop_enabled_missing_or_not_bool", value=value)
+            return False
+
+        return value
 
     async def get_zone_metadata(self) -> dict[int, ZoneMeta]:
         """Fetch per-zone structural metadata from HomeOps.

@@ -48,13 +48,18 @@ class Settings(BaseSettings):
 
     # ── VacuumOps module ───────────────────────────────────────────────────────
     cortex_vacuumops_dry_run: bool = False  # Global override removed; per-unit DB flags control
-    cortex_vacuumops_mop_enabled: bool = False
-    # Master kill switch for the mop-cadence gate (modules/vacuumops/mop.py).
-    # Defaults to FALSE — opt-in, not opt-out. Wet-mopping is a physical action on
-    # Carlos's floors that runs unsupervised; the safe posture for a missing or
-    # misspelled env var is "do not mop". When False the gate still evaluates
-    # every arm and logs what it WOULD have done (shadow mode), so the decision
-    # trail can be reviewed before the Saros is allowed to run wet.
+    # NOTE: CORTEX_VACUUMOPS_MOP_ENABLED (the mop-cadence gate master kill switch)
+    # intentionally has NO field here as of 2026-08-18. It is now a live,
+    # DB-backed setting (HomeOps cortex_vacuumops_settings, GET/PATCH
+    # /api/cortex/vacuumops-settings) read fresh every loop tick via
+    # HomeOpsAdapter.get_vacuumops_mop_enabled() — not sourced from the
+    # environment at all, matching the per-unit dry_run precedent (commit
+    # bb0d47b removed that field's analogous env-var override for the same
+    # reason: two sources of truth for a safety-critical toggle produce
+    # confusing state). `extra = "ignore"` above means a stale
+    # CORTEX_VACUUMOPS_MOP_ENABLED left in an old .env is harmlessly ignored,
+    # not a startup error. See modules/vacuumops/config.py's mop_enabled
+    # field docstring for the full reasoning.
 
     # ── Service behaviour ──────────────────────────────────────────────────────
     log_level: str = "INFO"
