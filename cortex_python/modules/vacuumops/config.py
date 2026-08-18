@@ -1,7 +1,9 @@
 """VacuumOps module-level configuration.
 
-Separate from per-job descriptors (jobs.py). Loaded from env + module config
-block at process start.
+Separate from per-job descriptors (jobs.py). Most fields are loaded from env +
+module config block at process start (build_vacuumops_config()). `mop_enabled`
+is the one exception — it is live and DB-backed (HomeOps), re-read every loop
+tick rather than fixed at process start; see its field docstring below.
 
 Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §5.1
 """
@@ -67,13 +69,38 @@ class VacuumOpsConfig:
     # dirtiest zone.
     mop_deep_floor_type_blocklist: tuple[str, ...] = ("hardwood",)
 
-    # Master kill switch. Sourced from Settings.cortex_vacuumops_mop_enabled
-    # (env: CORTEX_VACUUMOPS_MOP_ENABLED) and threaded in by loop.py — this
-    # default is only the fallback for direct construction in tests.
+    # Master kill switch.
+    #
+    # NOT env-sourced. Originally CORTEX_VACUUMOPS_MOP_ENABLED (env var, took
+    # effect only at process start — a real flip required SSH + .env edit +
+    # `docker compose up -d` on the NAS). Carlos asked for a fast kill switch
+    # instead, so this is now a live, DB-backed setting
+    # (HomeOps `cortex_vacuumops_settings`, GET/PATCH /api/cortex/vacuumops-
+    # settings) that loop.py reads fresh every tick via
+    # HomeOpsAdapter.get_vacuumops_mop_enabled() and threads in per-tick with
+    # `dataclasses.replace(vacuumops_cfg, mop_enabled=live_value)` — see
+    # loop.vacuumops_loop(). build_vacuumops_config() below deliberately does
+    # NOT set this field; the dataclass default is only the fallback for
+    # direct construction (tests, or a code path that never receives a live
+    # value) and is never the value the running loop actually dispatches on.
+    #
+    # Two prior-art precedents inform this design:
+    #   1. The analogous per-unit vac_units.dry_run column (commit 682f687)
+    #      proved the "small DB flag, hot-toggleable, no redeploy" shape works.
+    #   2. commit bb0d47b then REMOVED that dry_run flow's global env-var
+    #      override entirely ("remove global dry_run override; per-unit DB
+    #      flags are sole control") because an env var silently OR-ing with a
+    #      DB flag produced confusing state — an operator flips the DB value
+    #      expecting it to take effect and it silently doesn't, because a
+    #      stale env var is still forcing the old behavior. This field follows
+    #      that same precedent: DB is the sole source of truth, no env-var
+    #      override kept. See the PR description for the fuller reasoning.
     #
     # Defaults to FALSE: opt-in, not opt-out. Wet-mopping is a physical action on
-    # real floors that runs unsupervised, so a missing or misspelled env var must
-    # fail to "do not mop".
+    # real floors that runs unsupervised, so any read failure (see
+    # HomeOpsAdapter.get_vacuumops_mop_enabled()'s docstring for the full list —
+    # HomeOps unreachable, malformed response, missing/non-bool field) must
+    # resolve to "do not mop".
     #
     # When False the gate still evaluates every arm and records what it WOULD
     # have done (shadow mode, reason "off:disabled(would:...)"), so the decision
@@ -86,17 +113,22 @@ def build_vacuumops_config(settings: Settings) -> VacuumOpsConfig:
 
     This exists as a named function rather than an inline expression in
     vacuumops_loop() so the env-var -> behaviour path is directly testable.
-    The mop kill switch originally shipped unwired precisely because the
-    construction was a one-line expression buried in the loop: the field
-    existed, the env var was documented, and nothing connected them. Tests that
-    build VacuumOpsConfig directly cannot catch that class of bug — they have to
-    go through this function.
+    A kill switch shipping unwired is a known failure mode here (ARIIA finding
+    1 on the original mop_enabled env var): the field existed, the env var was
+    documented, and nothing connected them. Tests that build VacuumOpsConfig
+    directly cannot catch that class of bug — they have to go through this
+    function.
 
     Every env-sourced field belongs here. If you add one to VacuumOpsConfig and
-    it is meant to be operator-controlled, wire it in this function and assert it
-    in tests/unit/vacuumops/test_mop.py::TestSettingsWiring.
+    it is meant to be operator-controlled, wire it in this function and assert
+    it in tests/unit/vacuumops/test_mop.py::TestSettingsWiring.
+
+    mop_enabled is intentionally NOT wired here — it is no longer env-sourced.
+    See the field's docstring above for the live DB-backed replacement; the
+    per-tick wiring lives in loop.vacuumops_loop(), and its own regression
+    coverage lives in TestLiveMopEnabledWiring (test_mop.py), analogous to
+    what TestSettingsWiring does for the fields that remain env-sourced.
     """
     return VacuumOpsConfig(
         dry_run=settings.cortex_vacuumops_dry_run,
-        mop_enabled=settings.cortex_vacuumops_mop_enabled,
     )

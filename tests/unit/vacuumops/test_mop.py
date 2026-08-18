@@ -15,6 +15,7 @@ Coverage:
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -578,13 +579,14 @@ class TestJobScoping:
         assert d.reason == "off:no_zone_due"
 
 
-# ── §7: settings wiring — env var all the way through to behaviour ──────────
+# ── §7: settings wiring — dry_run is still env-sourced ───────────────────────
 #
 # Regression guard for ARIIA finding 1: CORTEX_VACUUMOPS_MOP_ENABLED was
 # documented and the dataclass field existed, but nothing connected them —
 # loop.py constructed VacuumOpsConfig(dry_run=...) only, so the switch was dead.
 # The original tests missed it because they built VacuumOpsConfig directly.
-# These go through Settings and build_vacuumops_config instead.
+# mop_enabled is no longer env-sourced at all (see §7b below for its
+# replacement coverage) — dry_run is the one field remaining here.
 
 
 _REQUIRED_ENV = {
@@ -604,27 +606,6 @@ def _settings_with(monkeypatch, **overrides):
 
 
 class TestSettingsWiring:
-    def test_env_var_true_enables_the_gate(self, monkeypatch):
-        from cortex_python.modules.vacuumops.config import build_vacuumops_config
-
-        settings = _settings_with(monkeypatch, CORTEX_VACUUMOPS_MOP_ENABLED="true")
-        cfg = build_vacuumops_config(settings)
-        assert cfg.mop_enabled is True
-
-    def test_env_var_false_disables_the_gate(self, monkeypatch):
-        from cortex_python.modules.vacuumops.config import build_vacuumops_config
-
-        settings = _settings_with(monkeypatch, CORTEX_VACUUMOPS_MOP_ENABLED="false")
-        assert build_vacuumops_config(settings).mop_enabled is False
-
-    def test_unset_env_var_defaults_to_disabled(self, monkeypatch):
-        """Opt-in: wet-mopping runs unsupervised, so absent config must not mop."""
-        from cortex_python.modules.vacuumops.config import build_vacuumops_config
-
-        monkeypatch.delenv("CORTEX_VACUUMOPS_MOP_ENABLED", raising=False)
-        settings = _settings_with(monkeypatch)
-        assert build_vacuumops_config(settings).mop_enabled is False
-
     def test_dry_run_still_wired(self, monkeypatch):
         """Guard the pre-existing field against the same class of regression."""
         from cortex_python.modules.vacuumops.config import build_vacuumops_config
@@ -632,28 +613,264 @@ class TestSettingsWiring:
         settings = _settings_with(monkeypatch, CORTEX_VACUUMOPS_DRY_RUN="true")
         assert build_vacuumops_config(settings).dry_run is True
 
-    def test_env_var_reaches_actual_mop_behaviour(self, monkeypatch):
-        """End to end: env var -> Settings -> config -> resolve_batch_mop outcome.
-
-        This is the assertion that would have failed on the original code.
+    def test_build_vacuumops_config_does_not_read_the_retired_env_var(
+        self, monkeypatch
+    ):
+        """mop_enabled must NOT come back from Settings, even if a stale
+        CORTEX_VACUUMOPS_MOP_ENABLED=true lingers in an old .env — that env var
+        is retired (see config.py's mop_enabled field docstring). Settings'
+        `extra = "ignore"` means it doesn't error either; build_vacuumops_config
+        simply never reads it into the dataclass.
         """
         from cortex_python.modules.vacuumops.config import build_vacuumops_config
+
+        settings = _settings_with(monkeypatch, CORTEX_VACUUMOPS_MOP_ENABLED="true")
+        # The dataclass default (False) wins — nothing wires the stale env var in.
+        assert build_vacuumops_config(settings).mop_enabled is False
+
+
+# ── §7b: live, DB-backed mop_enabled — HomeOps read path + per-tick wiring ───
+#
+# Replaces the env-var regression guard above (commit history: ARIIA finding 1
+# on CORTEX_VACUUMOPS_MOP_ENABLED). The kill switch is now a live setting read
+# from HomeOps every loop tick — HomeOpsAdapter.get_vacuumops_mop_enabled() —
+# and threaded into the tick's VacuumOpsConfig via `dataclasses.replace()` in
+# loop.vacuumops_loop() rather than being fixed at process start. Two things
+# need guarding against regressing silently, same as the original env var bug:
+#   1. The adapter's fail-closed contract (7a) — every unreachable/malformed/
+#      missing-field case must resolve to False, never raise, never default True.
+#   2. The value actually reaching resolve_batch_mop's decision (7b) — mirrors
+#      the old test_env_var_reaches_actual_mop_behaviour, but through the real
+#      per-tick mechanism (dataclasses.replace) instead of Settings/env vars.
+
+
+class _RaisingClient:
+    """Fake httpx.AsyncClient whose .get() raises — simulates HomeOps
+    unreachable (connection refused, timeout, DNS failure, etc.)."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url: str):
+        raise self._exc
+
+
+class _StatusErrorClient:
+    """Fake httpx.AsyncClient whose .get() returns a response that raises on
+    raise_for_status() — simulates a non-2xx (e.g. HomeOps 500, or 404 on an
+    old HomeOps build predating this endpoint)."""
+
+    class _Resp:
+        def raise_for_status(self):
+            import httpx
+
+            raise httpx.HTTPStatusError("boom", request=None, response=None)  # type: ignore[arg-type]
+
+        def json(self):
+            raise AssertionError("json() must not be reached after raise_for_status()")
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url: str):
+        return self._Resp()
+
+
+def _adapter_get_returning(payload):
+    """Build a HomeOpsAdapter whose GET returns `payload` verbatim as JSON.
+
+    Reuses the _ZonesResponse/_ZonesClient shape already defined below in this
+    file for get_zone_metadata's tests — same fake-client pattern, different
+    call site.
+    """
+    from cortex_python.adapters.homeops_adapter import HomeOpsAdapter
+
+    adapter = HomeOpsAdapter.__new__(HomeOpsAdapter)
+    adapter._base_url = "http://homeops.test"  # type: ignore[attr-defined]
+    adapter._api_key = "test"  # type: ignore[attr-defined]
+    adapter._headers = {}  # type: ignore[attr-defined]
+    adapter._client = lambda: _ZonesClient(payload)  # type: ignore[method-assign]
+    return adapter
+
+
+def _adapter_get_raising(exc: Exception):
+    from cortex_python.adapters.homeops_adapter import HomeOpsAdapter
+
+    adapter = HomeOpsAdapter.__new__(HomeOpsAdapter)
+    adapter._base_url = "http://homeops.test"  # type: ignore[attr-defined]
+    adapter._api_key = "test"  # type: ignore[attr-defined]
+    adapter._headers = {}  # type: ignore[attr-defined]
+    adapter._client = lambda: _RaisingClient(exc)  # type: ignore[method-assign]
+    return adapter
+
+
+def _adapter_get_bad_status():
+    from cortex_python.adapters.homeops_adapter import HomeOpsAdapter
+
+    adapter = HomeOpsAdapter.__new__(HomeOpsAdapter)
+    adapter._base_url = "http://homeops.test"  # type: ignore[attr-defined]
+    adapter._api_key = "test"  # type: ignore[attr-defined]
+    adapter._headers = {}  # type: ignore[attr-defined]
+    adapter._client = lambda: _StatusErrorClient()  # type: ignore[method-assign]
+    return adapter
+
+
+class TestGetVacuumopsMopEnabledFailClosed:
+    """HomeOpsAdapter.get_vacuumops_mop_enabled() — every ambiguity -> False."""
+
+    @pytest.mark.asyncio
+    async def test_confirmed_true(self):
+        adapter = _adapter_get_returning({"data": {"mop_enabled": True}})
+        assert await adapter.get_vacuumops_mop_enabled() is True
+
+    @pytest.mark.asyncio
+    async def test_confirmed_false(self):
+        adapter = _adapter_get_returning({"data": {"mop_enabled": False}})
+        assert await adapter.get_vacuumops_mop_enabled() is False
+
+    @pytest.mark.asyncio
+    async def test_homeops_unreachable_fails_closed(self):
+        """Connection error mid-tick must not raise (would take down the tick)
+        and must not default to True."""
+        adapter = _adapter_get_raising(ConnectionError("connection refused"))
+        assert await adapter.get_vacuumops_mop_enabled() is False
+
+    @pytest.mark.asyncio
+    async def test_non_2xx_status_fails_closed(self):
+        adapter = _adapter_get_bad_status()
+        assert await adapter.get_vacuumops_mop_enabled() is False
+
+    @pytest.mark.asyncio
+    async def test_missing_data_key_fails_closed(self):
+        adapter = _adapter_get_returning({"unexpected": "shape"})
+        assert await adapter.get_vacuumops_mop_enabled() is False
+
+    @pytest.mark.asyncio
+    async def test_data_not_a_dict_fails_closed(self):
+        adapter = _adapter_get_returning({"data": None})
+        assert await adapter.get_vacuumops_mop_enabled() is False
+
+    @pytest.mark.asyncio
+    async def test_missing_mop_enabled_field_fails_closed(self):
+        """Pre-migration HomeOps (endpoint exists but row/column doesn't) must
+        not be misread as an implicit True."""
+        adapter = _adapter_get_returning({"data": {}})
+        assert await adapter.get_vacuumops_mop_enabled() is False
+
+    @pytest.mark.asyncio
+    async def test_non_bool_mop_enabled_fails_closed(self):
+        """A malformed response (e.g. the string "true", or 1) must not be
+        truthy-coerced — only a literal bool True is accepted."""
+        adapter = _adapter_get_returning({"data": {"mop_enabled": "true"}})
+        assert await adapter.get_vacuumops_mop_enabled() is False
+
+    @pytest.mark.asyncio
+    async def test_null_mop_enabled_fails_closed(self):
+        adapter = _adapter_get_returning({"data": {"mop_enabled": None}})
+        assert await adapter.get_vacuumops_mop_enabled() is False
+
+
+class TestLivePerTickWiring:
+    """The live value actually reaching resolve_batch_mop's decision.
+
+    Mirrors loop.vacuumops_loop()'s real mechanism: a base VacuumOpsConfig
+    (mop_enabled always False, per build_vacuumops_config()'s fallback) is
+    replaced per-tick with the value read from HomeOps —
+    `dataclasses.replace(vacuumops_cfg, mop_enabled=live_mop_enabled)` — not
+    mutated, and not sourced from Settings/env at all.
+    """
+
+    def test_live_false_keeps_gate_off(self):
+        base = VacuumOpsConfig()  # process-start default: mop_enabled=False
+        tick_cfg = dataclasses.replace(base, mop_enabled=False)
+
+        job = Saros1FRoomsJob()
+        ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=9.0)])
+        decision = resolve_batch_mop(
+            batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), tick_cfg, _NOW
+        )
+        assert decision.mop is False
+
+    def test_live_true_enables_the_gate_this_tick(self):
+        base = VacuumOpsConfig()
+        tick_cfg = dataclasses.replace(base, mop_enabled=True)
+
+        job = Saros1FRoomsJob()
+        ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=9.0)])
+        decision = resolve_batch_mop(
+            batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), tick_cfg, _NOW
+        )
+        assert decision.mop is True
+        assert decision.intensity == "low"
+
+    def test_toggling_between_ticks_is_not_sticky(self):
+        """The mechanism is a fresh replace() every tick, not a cached/mutated
+        object — flipping HomeOps's value must take effect on the very next
+        resolve_batch_mop call, with no leftover state from the prior tick.
+        This is the behavioural core of "quickly disable": there is no cache
+        to invalidate, so there is nothing that can serve a stale value.
+        """
+        base = VacuumOpsConfig()
+        job = Saros1FRoomsJob()
+        ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=9.0)])
+        args = (batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job))
+
+        tick1 = dataclasses.replace(base, mop_enabled=True)
+        assert resolve_batch_mop(*args, tick1, _NOW).mop is True
+
+        tick2 = dataclasses.replace(base, mop_enabled=False)  # Carlos flipped it off
+        assert resolve_batch_mop(*args, tick2, _NOW).mop is False
+
+        tick3 = dataclasses.replace(base, mop_enabled=True)  # flipped back on
+        assert resolve_batch_mop(*args, tick3, _NOW).mop is True
+
+    def test_shadow_logging_survives_the_live_wiring_path_when_off(self):
+        """Shadow mode (full reasoning, dispatch suppressed) must still work
+        when mop_enabled arrives via the live/replace() path, not just when a
+        VacuumOpsConfig is constructed directly with mop_enabled=False."""
+        base = VacuumOpsConfig()
+        tick_cfg = dataclasses.replace(base, mop_enabled=False)
+
+        job = Saros1FRoomsJob()
+        ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=9.0)])
+        decision = resolve_batch_mop(
+            batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), tick_cfg, _NOW
+        )
+        assert decision.mop is False
+        assert decision.reason.startswith("off:disabled(would:")
+        assert "schedule:" in decision.reason  # real arm reasoning, not a stub
+
+    def test_shadow_logging_survives_the_live_wiring_path_when_on(self):
+        """Same reasoning content whether the gate is live or shadowed — only
+        `mop` and whether the dispatch actually sends wet differ."""
+        base = VacuumOpsConfig()
 
         job = Saros1FRoomsJob()
         ctx = ctx_with([make_meta(_KITCHEN, last_mopped_days_ago=9.0)])
         args = (batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job))
 
-        off = build_vacuumops_config(
-            _settings_with(monkeypatch, CORTEX_VACUUMOPS_MOP_ENABLED="false")
+        off_decision = resolve_batch_mop(
+            *args, dataclasses.replace(base, mop_enabled=False), _NOW
         )
-        assert resolve_batch_mop(*args, off, _NOW).mop is False
+        on_decision = resolve_batch_mop(
+            *args, dataclasses.replace(base, mop_enabled=True), _NOW
+        )
 
-        on = build_vacuumops_config(
-            _settings_with(monkeypatch, CORTEX_VACUUMOPS_MOP_ENABLED="true")
-        )
-        decision = resolve_batch_mop(*args, on, _NOW)
-        assert decision.mop is True
-        assert decision.intensity == "low"
+        assert off_decision.mop is False
+        assert on_decision.mop is True
+        # Same triggering arm/zones either way — only the dispatch outcome differs.
+        assert off_decision.triggering_zones == on_decision.triggering_zones
+        assert "schedule:" in off_decision.reason
+        assert "schedule:" in on_decision.reason
 
 
 # ── §6: trigger_vacuum payload — the wiring the ticket was filed for ─────────

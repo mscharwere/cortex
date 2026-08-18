@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import uuid
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
@@ -959,7 +960,10 @@ async def vacuumops_loop(settings: Settings) -> None:
     log.info(
         "vacuumops_loop.started",
         dry_run=vacuumops_cfg.dry_run,
-        mop_enabled=vacuumops_cfg.mop_enabled,
+        # mop_enabled is no longer static config — it's read fresh from HomeOps
+        # every tick (see live_mop_enabled below), so there is nothing meaningful
+        # to log at startup beyond the source.
+        mop_enabled_source="homeops_db(live, per-tick)",
     )
 
     ctx: ContextSnapshot | None = None
@@ -978,10 +982,15 @@ async def vacuumops_loop(settings: Settings) -> None:
             patterns = _load_patterns()
 
             # Build snapshot
-            # build_snapshot returns (ctx, unit_dry_runs) where unit_dry_runs is
-            # dict[robot_name → dry_run bool] from the HomeOps vac_units.dry_run column.
+            # build_snapshot returns (ctx, unit_dry_runs, live_mop_enabled):
+            #   unit_dry_runs      dict[robot_name → dry_run bool], from HomeOps
+            #                      vac_units.dry_run column.
+            #   live_mop_enabled   the mop-cadence gate's kill switch, from HomeOps
+            #                      cortex_vacuumops_settings (fail-closed to False
+            #                      on any read problem — see HomeOpsAdapter
+            #                      .get_vacuumops_mop_enabled()).
             try:
-                ctx, unit_dry_runs = await build_snapshot(
+                ctx, unit_dry_runs, live_mop_enabled = await build_snapshot(
                     tick_id, ha_adapter, homeops_adapter, settings
                 )
             except Exception as exc:
@@ -998,6 +1007,16 @@ async def vacuumops_loop(settings: Settings) -> None:
                 )
                 await asyncio.sleep(60)
                 continue
+
+            # Tick-scoped VacuumOpsConfig: everything except mop_enabled is fixed
+            # for the life of the process (vacuumops_cfg, built once above); the
+            # mop-cadence gate's kill switch is live and must reflect what HomeOps
+            # said THIS tick, so it is threaded in per-tick via dataclasses.replace
+            # rather than mutating the shared vacuumops_cfg object. Only
+            # resolve_batch_mop consumes cfg.mop_enabled (evaluate_zone's
+            # vacuumops_cfg param is only ever read for l1_overflow_confidence) —
+            # so only the mop resolution below is passed this tick-scoped copy.
+            tick_vacuumops_cfg = dataclasses.replace(vacuumops_cfg, mop_enabled=live_mop_enabled)
 
             # Group jobs by robot
             per_robot: dict[str, list[ZoneOutcome]] = defaultdict(list)
@@ -1102,7 +1121,7 @@ async def vacuumops_loop(settings: Settings) -> None:
                     batch=batch,
                     ctx=ctx,
                     job_for_zone=mop_job_map,
-                    cfg=vacuumops_cfg,
+                    cfg=tick_vacuumops_cfg,
                 )
 
                 await persist_decision(

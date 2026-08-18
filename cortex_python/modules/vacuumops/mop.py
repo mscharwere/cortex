@@ -71,12 +71,18 @@ been mopped, someone may be about to walk on it. So every unknown declines.
 
 SHADOW MODE
 -----------
-`VacuumOpsConfig.mop_enabled` (env `CORTEX_VACUUMOPS_MOP_ENABLED`, default
-False) is an opt-in master switch. When it is off the gate still evaluates every
-arm and records what it WOULD have done — `off:disabled(would:...)` — because
-the point of the switch is to review the real decision trail before letting the
+`VacuumOpsConfig.mop_enabled` (live, DB-backed setting — HomeOps
+`cortex_vacuumops_settings`, read fresh every loop tick via
+`HomeOpsAdapter.get_vacuumops_mop_enabled()`; formerly the
+`CORTEX_VACUUMOPS_MOP_ENABLED` env var, fixed at process start — see
+config.py's field docstring for the migration history) is an opt-in master
+switch, default False. When it is off the gate still evaluates every arm and
+records what it WOULD have done — `off:disabled(would:...)` — because the
+point of the switch is to review the real decision trail before letting the
 Saros run wet. The switch is applied after the reasoning is computed, never as
-an early return.
+an early return. This module (mop.py) is unaware of *where* the flag comes
+from — it just reads `cfg.mop_enabled` off the `VacuumOpsConfig` it is handed
+— so nothing below changed when the source moved from env var to DB.
 
 Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md
 """
