@@ -234,9 +234,16 @@ class ContextSnapshot:
     noise_budget: float | None = None
     # 0–10 scale; computed by noise model (§6); None until noise step runs
     quiet_hours_2f: bool | None = None
-    # True if any 2F sleep zone occupied + in 9pm–8am
+    # The household quiet-hours window, read from
+    # sensor.home_context.attributes.quiet_hours (22:00–07:00 PST).
+    # Consumed by noise_budget() for 2F and 3F jobs, and by its sleep tier for
+    # all floors.
     quiet_hours_1f: bool | None = None
-    # True in 10pm–7am window
+    # A 1F-LOCAL courtesy window (22:00–23:00 PST), computed by
+    # utils.is_quiet_hours_1f(). NOT the same signal as quiet_hours_2f — the two
+    # were previously aliased to the same value, which made 1F impossible to
+    # relax overnight without also relaxing 2F. Consumed by noise_budget() for
+    # 1F jobs only.
 
     # Presence fields — parsed from sensor.home_context attributes (spec §2)
     # Populated by synth; consumed by R1 occupancy-gate overrides.

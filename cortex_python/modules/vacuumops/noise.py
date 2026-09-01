@@ -82,6 +82,11 @@ def noise_budget(ctx: ContextSnapshot, floor: str) -> float:
       - 1F jobs receive only a mild reduction (×0.80) — sound from the ground
         floor does not meaningfully reach 2F bedrooms.
 
+    ``floor`` also selects which quiet-hours flag applies: 1F reduces on
+    ``ctx.quiet_hours_1f`` (a short 1F-local window), 2F and 3F on
+    ``ctx.quiet_hours_2f`` (the household window). See the inline note at that
+    reducer for why the two are no longer the same signal.
+
     Spec: §6.3
     """
     budget = 10.0  # start fully open
@@ -105,8 +110,32 @@ def noise_budget(ctx: ContextSnapshot, floor: str) -> float:
         else:
             budget *= 0.80  # 1F: sound doesn't reach 2F; mild reduction only
 
-    # Quiet hours 1F (10pm–7am) — daytime suppression for 1F jobs
-    if ctx.quiet_hours_1f:
+    # Quiet-hours reducer — floor-scoped.
+    #
+    # quiet_hours_1f and quiet_hours_2f used to hold the same value (the synth
+    # aliased both to sensor.home_context.attributes.quiet_hours), so this
+    # reducer fired on every floor regardless of its name, and 1F could not be
+    # relaxed overnight without also relaxing 2F. They are now independent:
+    #
+    #   1F  → quiet_hours_1f: a 1F-local courtesy window, 22:00-23:00 PST.
+    #         Ends at the measured 23:00 occupancy cliff. From 23:00 the ground
+    #         floor is empty and the floor-aware sleep tier above (1F ×0.80) is
+    #         the correct and sufficient model on its own — stacking a second
+    #         ×0.40 on top of it was double-counting the same household sleep
+    #         signal and contradicted this function's own stated intent that
+    #         ground-floor noise does not meaningfully reach the 2F bedrooms.
+    #         Net effect: 1F is no longer suppressed 23:00-07:00, which is where
+    #         essentially all of its long clear windows actually are.
+    #
+    #   2F/3F → quiet_hours_2f: the household quiet-hours window (22:00-07:00),
+    #         exactly the value both floors were already reducing on before the
+    #         split. Deliberately unchanged — this branch exists so 2F and 3F
+    #         budgets stay bit-for-bit identical and the behaviour change is
+    #         confined to 1F.
+    if floor == "1F":
+        if ctx.quiet_hours_1f:
+            budget *= 0.40
+    elif ctx.quiet_hours_2f:
         budget *= 0.40
 
     # Active cooking — kitchen detected_activity == "cooking"

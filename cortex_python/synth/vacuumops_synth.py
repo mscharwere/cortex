@@ -10,7 +10,9 @@ Fetches:
 
 Computes:
   - noise_budget (§6.3) — stored as ctx.noise_budget
-  - quiet_hours_1f / quiet_hours_2f — sourced from sensor.home_context.attributes.quiet_hours
+  - quiet_hours_2f — sourced from sensor.home_context.attributes.quiet_hours
+  - quiet_hours_1f — 1F-local courtesy window (utils.is_quiet_hours_1f), NOT the
+    same signal as quiet_hours_2f
 
 Graceful degradation per spec §8.5:
   - HA WS down: use safe defaults, mark ctx.degraded = True
@@ -38,6 +40,7 @@ from cortex_python.modules.vacuumops.schemas import (
     RoomActivity,
     ZoneMeta,
 )
+from cortex_python.modules.vacuumops.utils import is_quiet_hours_1f
 
 if TYPE_CHECKING:
     from cortex_python.adapters.ha_rest_adapter import HARestAdapter
@@ -545,15 +548,29 @@ async def build_snapshot(
         calendar_degraded = True
 
     # ── Quiet-hours flags ─────────────────────────────────────────────────────
-    # Both flags sourced from sensor.home_context.attributes.quiet_hours.
-    # home_context is the canonical authority — avoids CORTEX time-window drift
-    # from HA's own quiet-hours logic (confirmed divergence: home_context.quiet_hours=false
-    # while CORTEX computed quiet_hours_2f=true at 9:22 PM, blocking a 100-dirt dispatch).
-    # Degraded case (home={}): defaults to False — fail-open is acceptable; home_context
-    # unavailability is already marked ctx.degraded=True above.
-    _hc_quiet = bool(home.get("quiet_hours", False))
-    quiet_hours_1f = _hc_quiet
-    quiet_hours_2f = _hc_quiet
+    # These are two DIFFERENT quantities and are sourced separately. They used
+    # to be the same value (both `= _hc_quiet`), which meant 1F could not be
+    # relaxed overnight without also relaxing 2F.
+    #
+    # quiet_hours_2f — sensor.home_context.attributes.quiet_hours, unchanged.
+    #   home_context stays the canonical authority for the household quiet-hours
+    #   convention (`hour >= 22 or hour < 7`); reading it rather than recomputing
+    #   avoids CORTEX time-window drift from HA's own logic (confirmed
+    #   divergence: home_context.quiet_hours=false while CORTEX computed
+    #   quiet_hours_2f=true at 9:22 PM, blocking a 100-dirt dispatch).
+    #   Degraded case (home={}): defaults to False — fail-open is acceptable;
+    #   home_context unavailability is already marked ctx.degraded=True above.
+    #
+    # quiet_hours_1f — a 1F-local courtesy window, 22:00-23:00 PST, computed
+    #   from the tick clock. Deliberately far shorter than the household window:
+    #   from 23:00 the ground floor is measured empty, and noise_budget()'s
+    #   floor-aware sleep tier (1F ×0.80) is already the right model for
+    #   ground-floor noise during the household sleep window. See
+    #   utils.is_quiet_hours_1f for the full rationale and the measurements.
+    #   Being clock-derived, this flag does not degrade when home_context is
+    #   unavailable — strictly more robust than the aliased value it replaces.
+    quiet_hours_2f = bool(home.get("quiet_hours", False))
+    quiet_hours_1f = is_quiet_hours_1f(now)
 
     # ── Assemble snapshot ─────────────────────────────────────────────────────
     ctx = ContextSnapshot(

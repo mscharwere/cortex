@@ -37,12 +37,28 @@ patterns:
     relevance: ["transit"]
     jobs: ["*"]
 
-  # ── School day window (good dispatch window) ───────────────────────────────
+  # ── School day window (kids absent — NOT a quiet house) ───────────────────
+  #
+  # These two patterns previously asserted this was the "best window for all
+  # cleaning runs". Measured against 7 days of live 1F occupancy history that
+  # is close to the exact opposite, so the descriptions below now state what
+  # the data shows. They are kept (not deleted) because the causal fact they
+  # encode — the kids are gone, so kid-driven transit and noise are absent —
+  # is real and is not learnable from an occupancy sensor. What was wrong was
+  # the inference drawn from it: kids away ≠ house empty, because Elena is
+  # home on 1F through essentially all of it.
   - name: kids_school_window_mon_thu
     days: [1, 2, 3, 4]
     start: "08:40"
     end: "15:05"
-    description: "Both kids at school. House quiet with only Elena and possibly Carlos present. Best window for all cleaning runs."
+    description: >-
+      Both kids at school, so no kid-driven transit or noise. This is NOT a
+      quiet house and NOT a good dispatch window: Elena is home and works on
+      1F, and binary_sensor.first_floor_occupancy_status measures 85% occupied
+      across this window (hours 12-14 read 96-100%, the most occupied hours of
+      the weekday). Clear runs here are short and the room typically re-occupies
+      before a 25-45 min Saros mission finishes. Treat kid absence as removing
+      one noise source, not as an opening.
     relevance: ["window"]
     jobs: ["*"]
 
@@ -50,7 +66,11 @@ patterns:
     days: [5]
     start: "08:40"
     end: "13:50"
-    description: "Both kids at school — Friday early release. Carlitos home ~13:50, Daniel ~14:30. Shorter window."
+    description: >-
+      Both kids at school — Friday early release. Carlitos home ~13:50, Daniel
+      ~14:30, so the kid-free stretch is shorter than Mon-Thu. Same caveat as
+      kids_school_window_mon_thu: Elena is home, 1F stays largely occupied, and
+      this is not a good dispatch window.
     relevance: ["window"]
     jobs: ["*"]
 

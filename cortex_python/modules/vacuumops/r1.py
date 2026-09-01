@@ -471,7 +471,7 @@ def noise_budget_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tu
 
     if budget <= 0.0:
         # Identify dominant reducer
-        reason = _dominant_budget_reducer(ctx)
+        reason = _dominant_budget_reducer(ctx, job.floor)
         return "FAIL", "comfort", reason
 
     if impact <= budget * _NOISE_STRONG_PASS_FACTOR:
@@ -482,7 +482,7 @@ def noise_budget_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tu
         return "AMBIGUOUS", "comfort", f"noise_marginal:impact={impact:.2f}:budget={budget:.2f}"
 
     # impact > budget
-    reason = _dominant_budget_reducer(ctx)
+    reason = _dominant_budget_reducer(ctx, job.floor)
     return "FAIL", "comfort", reason
 
 
@@ -760,19 +760,28 @@ async def run_r1(
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _dominant_budget_reducer(ctx: ContextSnapshot) -> str:
+def _dominant_budget_reducer(ctx: ContextSnapshot, floor: str = "1F") -> str:
     """Identify the most dominant reason the noise budget is near-zero.
 
     Used in noise_budget_check FAIL reason string for the decision log.
+
+    ``floor`` matters because the quiet-hours reducer in noise_budget() is
+    floor-scoped: 1F reduces on quiet_hours_1f, 2F/3F on quiet_hours_2f. Naming
+    the flag that did not actually apply to this job's floor would put a wrong
+    cause in the decision log — the 2026-08-31 incident was a gate whose real
+    behaviour was invisible in that log, so the reason string is load-bearing.
     """
     elena = ctx.people.get("elena")
     if elena and elena.piano:
         return "piano_active"
 
-    if ctx.quiet_hours_2f:
+    # Sleep tier — driven by quiet_hours_2f on every floor (see noise_budget).
+    # Reported ahead of the floor's own quiet-hours flag because it is the
+    # larger multiplier on 2F (×0.05) and 3F (×0.20).
+    if ctx.quiet_hours_2f and floor != "1F":
         return "quiet_hours_2f_active"
 
-    if ctx.quiet_hours_1f:
+    if floor == "1F" and ctx.quiet_hours_1f:
         return "quiet_hours_1f_active"
 
     kitchen = ctx.rooms.get("kitchen")
@@ -791,5 +800,13 @@ def _dominant_budget_reducer(ctx: ContextSnapshot) -> str:
     lr = ctx.rooms.get("living_room")
     if lr and lr.raw_occupancy and lr.confidence > 0.6:
         return "living_room_occupied"
+
+    # 1F during household quiet hours but outside the short 1F courtesy window.
+    # Reported LAST because ×0.80 is the mildest multiplier in noise_budget() —
+    # anything above would mask a stronger, more actionable cause. Named at all
+    # so a 1F overnight deferral is not logged as a bare "budget exceeded", and
+    # never as "quiet_hours_1f_active", which is not what is being applied.
+    if ctx.quiet_hours_2f:
+        return "sleep_tier_1f_mild"
 
     return "noise_budget_exceeded"
