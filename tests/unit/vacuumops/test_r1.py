@@ -22,6 +22,7 @@ from cortex_python.modules.vacuumops.r1 import (
     transit_pattern_lookahead,
     zone_active_use_check,
 )
+from cortex_python.modules.vacuumops.noise import noise_budget
 from cortex_python.modules.vacuumops.schemas import ZoneMeta, ZoneInfo
 from tests.unit.vacuumops.conftest import make_room, make_snapshot
 
@@ -252,13 +253,84 @@ def test_noise_budget_check_ambiguous_marginal():
     assert result in ("PASS", "AMBIGUOUS")  # not a hard FAIL from living room alone
 
 
-def test_noise_budget_check_fail_quiet_hours_1f(litter_box_job):
-    """Quiet hours 1F active → reduced budget → check FAIL behavior."""
+def test_noise_budget_check_quiet_hours_1f_ignored_by_3f_job(litter_box_job):
+    """quiet_hours_1f must not touch a 3F job's budget.
+
+    litter_box_job is Ethan3FLitterBoxJob (floor="3F"). Since the quiet-hours
+    split this flag is 1F-scoped, so the budget stays fully open at 10.0 and the
+    impact of 1.0 passes strongly. (Before the split the flag applied to every
+    floor, giving budget 4.0 — which also passed, so the outcome is unchanged;
+    the budget it passed on is not.)
+    """
     ctx = make_snapshot(quiet_hours_1f=True)
-    # budget = 10 * 0.4 = 4.0; impact = 1.0 → PASS-strong (1.0 ≤ 4.0 * 0.7 = 2.8)
+    assert noise_budget(ctx, litter_box_job.floor) == pytest.approx(10.0)
     result, gate, reason = noise_budget_check(litter_box_job, "Litter Box", ctx)
-    # With just quiet_hours_1f, budget is still 4.0 — impact 1.0 passes strongly
     assert result == "PASS"
+
+
+def test_noise_budget_check_quiet_hours_1f_applies_to_1f_job():
+    """The same flag DOES reduce a 1F job's budget: 10 * 0.4 = 4.0."""
+    from cortex_python.modules.vacuumops.jobs import Saros1FLitterBoxJob
+
+    job = Saros1FLitterBoxJob()
+    ctx = make_snapshot(quiet_hours_1f=True)
+    assert noise_budget(ctx, job.floor) == pytest.approx(4.0)
+    # impact = 1.0 → 1.0 ≤ 4.0 * 0.7 = 2.8 → still PASS-strong for this quiet job
+    result, gate, reason = noise_budget_check(job, "Litter Box", ctx)
+    assert result == "PASS"
+
+
+# ── _dominant_budget_reducer — floor-aware attribution ────────────────────────
+
+
+def test_dominant_reducer_names_the_1f_flag_for_a_1f_job():
+    """A 1F deferral must not be blamed on quiet_hours_2f, which no longer
+    reduces 1F's budget. Wrong causes in the decision log are what made the
+    2026-08-31 incident hard to see."""
+    from cortex_python.modules.vacuumops.r1 import _dominant_budget_reducer
+
+    ctx = make_snapshot(quiet_hours_1f=True, quiet_hours_2f=True)
+    assert _dominant_budget_reducer(ctx, "1F") == "quiet_hours_1f_active"
+
+
+def test_dominant_reducer_names_the_2f_flag_for_a_2f_job():
+    from cortex_python.modules.vacuumops.r1 import _dominant_budget_reducer
+
+    ctx = make_snapshot(quiet_hours_1f=True, quiet_hours_2f=True)
+    assert _dominant_budget_reducer(ctx, "2F") == "quiet_hours_2f_active"
+    assert _dominant_budget_reducer(ctx, "3F") == "quiet_hours_2f_active"
+
+
+def test_dominant_reducer_reports_mild_sleep_tier_on_1f_overnight():
+    """1F between 23:00 and 07:00: household quiet hours are on, the 1F courtesy
+    window is closed, so the only quiet-hours effect left is the ×0.80 sleep
+    tier. Say that, rather than implying a 1F block that is not applied."""
+    from cortex_python.modules.vacuumops.r1 import _dominant_budget_reducer
+
+    ctx = make_snapshot(quiet_hours_1f=False, quiet_hours_2f=True)
+    assert _dominant_budget_reducer(ctx, "1F") == "sleep_tier_1f_mild"
+
+
+def test_dominant_reducer_mild_sleep_tier_does_not_mask_a_stronger_cause():
+    """×0.80 is the mildest multiplier, so a real cause must still win.
+
+    1F at 23:30 with the kitchen cooking should read "cooking_in_progress"
+    (×0.30), not the sleep tier.
+    """
+    from cortex_python.modules.vacuumops.r1 import _dominant_budget_reducer
+
+    ctx = make_snapshot(quiet_hours_1f=False, quiet_hours_2f=True)
+    ctx.rooms["kitchen"] = make_room("cooking", confidence=0.8)
+    assert _dominant_budget_reducer(ctx, "1F") == "cooking_in_progress"
+
+
+def test_dominant_reducer_piano_still_outranks_quiet_hours():
+    from cortex_python.modules.vacuumops.r1 import _dominant_budget_reducer
+    from cortex_python.modules.vacuumops.schemas import PersonActivity
+
+    ctx = make_snapshot(quiet_hours_1f=True, quiet_hours_2f=True)
+    ctx.people["elena"] = PersonActivity(activity="home_idle", confidence=0.9, piano=True)
+    assert _dominant_budget_reducer(ctx, "1F") == "piano_active"
 
 
 # ── noise_radius_check ────────────────────────────────────────────────────────

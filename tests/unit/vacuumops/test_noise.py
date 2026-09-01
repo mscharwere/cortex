@@ -97,24 +97,40 @@ def test_noise_budget_piano_active(clean_ctx):
 
 
 def test_noise_budget_quiet_hours_1f(clean_ctx):
-    """Quiet hours 1F → budget = 10 * 0.4 = 4.0."""
+    """Quiet hours 1F, 1F job → budget = 10 * 0.4 = 4.0."""
     clean_ctx.quiet_hours_1f = True
     result = noise_budget(clean_ctx, "1F")
     assert result == pytest.approx(4.0)
 
 
 def test_noise_budget_sleep_active_2f_floor(clean_ctx):
-    """2F sleep, 2F job → budget = 10 * 0.05 = 0.5 (blocked — in the bedrooms)."""
+    """2F sleep, 2F job → budget = 10 * 0.05 * 0.40 = 0.2 (blocked — in the bedrooms).
+
+    Both the sleep tier (×0.05) and the household quiet-hours reducer (×0.40)
+    fire, because quiet_hours_2f drives both.
+
+    NOTE: this assertion was 0.5 before the quiet-hours split, when the ×0.40
+    reducer keyed off quiet_hours_1f alone. That 0.5 was never a value
+    production produced: the synth aliased quiet_hours_1f = quiet_hours_2f, so
+    a real overnight snapshot always had BOTH flags set and 2F always landed on
+    0.2. The split makes the ctx here (2f set, 1f clear) reachable for the first
+    time, and 0.2 is what preserves the real behaviour.
+    """
     clean_ctx.quiet_hours_2f = True
     result = noise_budget(clean_ctx, "2F")
-    assert result == pytest.approx(0.5)
+    assert result == pytest.approx(0.2)
 
 
 def test_noise_budget_sleep_active_3f_floor(clean_ctx):
-    """2F sleep, 3F job → budget = 10 * 0.20 = 2.0 (audible through 2F ceiling — blocked same as before)."""
+    """2F sleep, 3F job → budget = 10 * 0.20 * 0.40 = 0.8 (audible through 2F ceiling).
+
+    Same note as test_noise_budget_sleep_active_2f_floor: the pre-split
+    assertion of 2.0 described a ctx production never built. 0.8 is what 3F
+    actually got overnight before this change, and still gets after it.
+    """
     clean_ctx.quiet_hours_2f = True
     result = noise_budget(clean_ctx, "3F")
-    assert result == pytest.approx(2.0)
+    assert result == pytest.approx(0.8)
 
 
 def test_noise_budget_sleep_active_1f_floor(clean_ctx):
@@ -172,6 +188,126 @@ def test_noise_budget_multiplicative(clean_ctx):
     clean_ctx.quiet_hours_1f = True
     result = noise_budget(clean_ctx, "1F")
     assert result == pytest.approx(0.2)
+
+
+# ── Quiet-hours split: quiet_hours_1f is floor-scoped and independent of 2F ───
+#
+# Regression coverage for P3 / memo risk R9. These two flags used to hold the
+# same value, so the ×0.40 reducer fired on every floor and 1F could not be
+# relaxed overnight without also relaxing 2F.
+
+
+def test_quiet_hours_1f_does_not_reduce_2f_budget(clean_ctx):
+    """quiet_hours_1f is 1F-scoped: a 2F job must not see the ×0.40 reducer.
+
+    Applying a flag named _1f to 2F was a latent bug the aliasing hid.
+    """
+    clean_ctx.quiet_hours_1f = True
+    clean_ctx.quiet_hours_2f = False
+    assert noise_budget(clean_ctx, "2F") == pytest.approx(10.0)
+
+
+def test_quiet_hours_1f_does_not_reduce_3f_budget(clean_ctx):
+    """Same as above for 3F."""
+    clean_ctx.quiet_hours_1f = True
+    clean_ctx.quiet_hours_2f = False
+    assert noise_budget(clean_ctx, "3F") == pytest.approx(10.0)
+
+
+def test_quiet_hours_2f_does_not_reduce_1f_budget_beyond_sleep_tier(clean_ctx):
+    """THE P3 CASE — 23:00-07:00 on 1F.
+
+    Household quiet hours are active (2F asleep) but the short 1F courtesy
+    window has already closed. 1F must get ONLY the floor-aware sleep tier
+    (×0.80), not a second ×0.40 on top of it.
+
+    Before the split this returned 3.2, which put Saros1FRoomsJob
+    (noise_impact 3.0 on a clear floor) at AMBIGUOUS — an L1 call at 3am.
+    At 8.0 it is a strong PASS, which is what makes the overnight window
+    reachable at all.
+    """
+    clean_ctx.quiet_hours_2f = True
+    clean_ctx.quiet_hours_1f = False
+    assert noise_budget(clean_ctx, "1F") == pytest.approx(8.0)
+
+
+def test_quiet_hours_both_active_1f_still_reduced(clean_ctx):
+    """22:00-23:00 on 1F — the courtesy window is open, so ×0.80 × ×0.40 = 3.2.
+
+    The split relaxes the late-night band, not the wind-down hour.
+    """
+    clean_ctx.quiet_hours_2f = True
+    clean_ctx.quiet_hours_1f = True
+    assert noise_budget(clean_ctx, "1F") == pytest.approx(3.2)
+
+
+def test_saros_1f_rooms_overnight_is_strong_pass(clean_ctx):
+    """End-to-end on the real job: Saros 1F rooms passes noise at 23:00-07:00.
+
+    Ties the budget change to the dispatch decision it is meant to unblock.
+    """
+    from cortex_python.modules.vacuumops.jobs import Saros1FRoomsJob
+    from cortex_python.modules.vacuumops.r1 import noise_budget_check
+
+    job = Saros1FRoomsJob()
+    clean_ctx.quiet_hours_2f = True  # household asleep
+    clean_ctx.quiet_hours_1f = False  # past 23:00
+
+    # impact = noise_level 3 * (1 + 0.5 * 0 occupied 1F rooms) = 3.0
+    assert noise_impact(job, clean_ctx) == pytest.approx(3.0)
+    # budget = 10 * 0.80 = 8.0 → 3.0 <= 8.0 * 0.7 = 5.6 → strong PASS
+    result, gate, reason = noise_budget_check(job, 21, clean_ctx)
+    assert result == "PASS"
+    assert gate == "none"
+
+
+def test_saros_1f_rooms_courtesy_window_is_not_strong_pass(clean_ctx):
+    """The 22:00-23:00 hour still escalates rather than waving Saros through."""
+    from cortex_python.modules.vacuumops.jobs import Saros1FRoomsJob
+    from cortex_python.modules.vacuumops.r1 import noise_budget_check
+
+    job = Saros1FRoomsJob()
+    clean_ctx.quiet_hours_2f = True
+    clean_ctx.quiet_hours_1f = True
+
+    # budget = 10 * 0.80 * 0.40 = 3.2; impact 3.0 > 3.2 * 0.7 = 2.24 → AMBIGUOUS
+    result, gate, reason = noise_budget_check(job, 21, clean_ctx)
+    assert result == "AMBIGUOUS"
+
+
+def test_sam_2f_overnight_still_blocked_after_split(clean_ctx):
+    """Guardrail: the 1F relaxation must not leak into Sam's 2F overnight gate."""
+    from cortex_python.modules.vacuumops.jobs import Sam2FJob
+    from cortex_python.modules.vacuumops.r1 import noise_budget_check
+
+    job = Sam2FJob()
+    clean_ctx.quiet_hours_2f = True
+    clean_ctx.quiet_hours_1f = False
+
+    # budget = 10 * 0.05 * 0.40 = 0.2; impact = 4 * 1.5 (house radius) = 6.0
+    assert noise_budget(clean_ctx, "2F") == pytest.approx(0.2)
+    result, gate, reason = noise_budget_check(job, 30, clean_ctx)
+    assert result == "FAIL"
+
+
+def test_ethan_3f_rooms_overnight_still_blocked_after_split(clean_ctx):
+    """Guardrail: same for Ethan on 3F.
+
+    3F is the floor most at risk of an accidental loosening — its sleep tier is
+    ×0.20 and Ethan3FRoomsJob's impact on a clear floor is exactly 2.0, so
+    dropping the ×0.40 would have flipped FAIL → AMBIGUOUS.
+    """
+    from cortex_python.modules.vacuumops.jobs import Ethan3FRoomsJob
+    from cortex_python.modules.vacuumops.r1 import noise_budget_check
+
+    job = Ethan3FRoomsJob()
+    clean_ctx.quiet_hours_2f = True
+    clean_ctx.quiet_hours_1f = False
+
+    # budget = 10 * 0.20 * 0.40 = 0.8; impact = 2 * (1 + 0.5 * 0) = 2.0
+    assert noise_budget(clean_ctx, "3F") == pytest.approx(0.8)
+    result, gate, reason = noise_budget_check(job, 10, clean_ctx)
+    assert result == "FAIL"
 
 
 # ── Spec §6.5 Worked Examples ─────────────────────────────────────────────────
