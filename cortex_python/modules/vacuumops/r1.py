@@ -20,13 +20,14 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §7.2
 
 from __future__ import annotations
 
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import redis.asyncio as aioredis
 
 from cortex_python.modules.vacuumops.jobs import VacuumJob
 from cortex_python.modules.vacuumops.noise import FLOOR_ROOM_MAP, noise_budget, noise_impact
-from cortex_python.modules.vacuumops.schemas import ContextSnapshot, ZoneMeta
+from cortex_python.modules.vacuumops.schemas import ContextSnapshot, OccupancyReading, ZoneMeta
 
 # Redis key for per-robot cooldown (D12).
 # cortex:vacuumops:robot_cooldown:<robot>
@@ -80,60 +81,299 @@ async def per_robot_cooldown_check(
     return "PASS", "none", "robot_cooldown_clear"
 
 
+# ── Occupancy confirmation window (spec §6.7, added 2026-08-31) ──────────────
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Normalize a datetime to aware-UTC. Naive values are assumed UTC."""
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+
+
+def occupancy_state(
+    occupied: bool,
+    last_changed: datetime | None,
+    now: datetime,
+    grace_s: int,
+) -> tuple[str, float | None]:
+    """Classify an occupancy reading into occupied / clearing / clear.
+
+    Returns (state, seconds_since_change):
+      "occupied" → sensor reads on. BLOCKS IMMEDIATELY — the grace window is
+                   deliberately one-directional and never delays this verdict.
+      "clearing" → sensor reads off, but flipped off less than grace_s ago.
+                   Treated as still-occupied for gating: an mmWave sensor that
+                   just dropped is far more likely to be a person holding still
+                   than a room that actually emptied.
+      "clear"    → sensor reads off and has held off for at least grace_s.
+
+    last_changed=None means the dwell time is unknown (sensor absent, or a
+    RoomActivity synthesized without a timestamp). That degrades to "clear"
+    rather than "clearing" so a missing timestamp is never *more* restrictive
+    than the pre-grace behaviour — availability, not dwell, is the field that
+    guards against a missing sensor.
+    """
+    if occupied:
+        return "occupied", None
+    if last_changed is None or grace_s <= 0:
+        return "clear", None
+    elapsed = (_as_utc(now) - _as_utc(last_changed)).total_seconds()
+    if elapsed < grace_s:
+        return "clearing", elapsed
+    return "clear", elapsed
+
+
+def _fmt_dwell(elapsed: float | None) -> str:
+    """Render a dwell time for a reason string, truncated rather than rounded.
+
+    `f"{119.6:.0f}"` renders "120", which makes the log read
+    `clear_for=120s<120s` — a comparison that looks false while being true.
+    Truncating toward zero keeps the printed value on the same side of the
+    threshold as the comparison that produced it: 119.6s prints as "119s".
+
+    Truncation (not floor) so a small negative elapsed from clock skew prints
+    as "0" rather than "-1"; either way the printed value stays below grace.
+    """
+    if elapsed is None:
+        return "?"
+    return str(int(elapsed))
+
+
+def _floor_reading(job: VacuumJob, ctx: ContextSnapshot) -> OccupancyReading | None:
+    """The dedicated area_occupancy rollup for the job's operating floor, if usable."""
+    reading = ctx.floor_occupancy.get(job.floor)
+    if reading is None or not reading.available:
+        return None
+    return reading
+
+
+# ── Shared occupancy resolution chain (spec §6.7) ─────────────────────────────
+
+
+@dataclass(frozen=True)
+class OccupancySignal:
+    """The winning tier of the occupancy resolution chain, plus its raw read.
+
+    `tier` is "zone" | "room" | "floor" — which precedence tier actually backed
+    this answer. `label` is the entity_id, room key or floor name to name in the
+    decision log.
+    """
+
+    tier: str
+    label: str
+    occupied: bool
+    last_changed: datetime | None
+
+
+def resolve_occupancy_signal(
+    job: VacuumJob,
+    ctx: ContextSnapshot,
+    zone_meta: ZoneMeta | None,
+    room_keys: tuple[str | None, ...],
+) -> OccupancySignal | None:
+    """Resolve occupancy through the strict precedence chain, most-specific first.
+
+    Each tier is used ONLY when it is actually backed by a live entity; otherwise
+    resolution falls through to the next tier. It never falls through to "clear":
+
+      1. ctx.occupancy_readings[zone_meta.occupancy_sensor] — the entity HomeOps
+         designated for this zone, read DIRECTLY by entity id. No naming
+         convention is involved, because the convention round-trip is lossy:
+         several zones point at sensors no suffix rule recovers (Dining Table →
+         binary_sensor.emotion_kitchen_dining_table_presence, Master Bedroom →
+         binary_sensor.master_bedroom_emotion_any_presence).
+      2. ctx.rooms[room_key] for the first candidate key that resolves to a room
+         with occupancy_available — the convention-named per-room sensor.
+         Retained as a middle tier so Sam's per-room model
+         (effectiveness_scope="room_only") keeps room-level precision for the
+         rooms that genuinely have a working sensor.
+      3. ctx.floor_occupancy[job.floor] — the area_occupancy floor rollup. The
+         backstop for any zone with no usable zone- or room-level signal.
+
+    Returns None only when all three tiers are unbacked — the caller decides what
+    "no signal at all" means for its gate.
+
+    `room_keys` is the ordered tuple of candidate tier-2 room keys, because the
+    two callers derive the room differently: the main gate uses
+    ctx.zone_info[zone_id].room_key, while Override 2 uses the zone's PARENT room
+    (room_key_for_zone), which is what a sub-zone like Litter Box needs. Nones
+    are skipped.
+    """
+    # Tier 1 — the zone's own designated entity.
+    designated = zone_meta.occupancy_sensor if zone_meta else None
+    reading = ctx.occupancy_readings.get(designated) if designated else None
+    if reading is not None and reading.available:
+        return OccupancySignal("zone", reading.entity_id, reading.occupied, reading.last_changed)
+
+    # Tier 2 — the convention-named room sensor, but only if it really exists.
+    for room_key in room_keys:
+        if not room_key:
+            continue
+        room = ctx.rooms.get(room_key)
+        if room is not None and room.occupancy_available:
+            return OccupancySignal(
+                "room", room_key, room.raw_occupancy, room.occupancy_last_changed
+            )
+
+    # Tier 3 — floor rollup backstop.
+    floor = _floor_reading(job, ctx)
+    if floor is not None:
+        return OccupancySignal("floor", job.floor, floor.occupied, floor.last_changed)
+
+    return None
+
+
 # ── Effectiveness rules ───────────────────────────────────────────────────────
 
 
 def zone_active_use_check(
-    job: VacuumJob, zone_id: int, ctx: ContextSnapshot
+    job: VacuumJob,
+    zone_id: int,
+    ctx: ContextSnapshot,
+    zone_meta: ZoneMeta | None = None,
 ) -> tuple[str, str, str]:
     """R1-E1: Zone must not be actively occupied or in active use.
 
-    Checks:
-    - raw_occupancy == False (with 90s grace — we treat False as clear; the
-      ContextSnapshot is assembled with the grace period baked in by the synth)
-    - detected_activity NOT IN {active, cooking, eating, transit}
+    Occupancy is resolved by resolve_occupancy_signal() — the single precedence
+    chain shared with Override 2's room-scoped bypass in run_r1(), so both paths
+    are guaranteed to read the same tiers in the same order:
 
-    Returns FAIL with reason if zone is occupied or in active use.
-    Sub-zones (room_key=None, e.g. Litter Box) have no room sensor — treat as clear.
+      1. ctx.occupancy_readings[zone_meta.occupancy_sensor] — the designated entity
+      2. ctx.rooms[zone_info.room_key] — the room sensor, only when available
+      3. ctx.floor_occupancy[job.floor] — the floor rollup backstop
+      4. Only if all three are unavailable is the zone treated as clear, and the
+         reason string says so explicitly.
+
+    Tier 3 is the fix for the permanent no-op class of bug: the Dining Table
+    zone (room_key="dining_room") has no binary_sensor.dining_room_occupancy_status
+    in HA at all, so tiers 1–2 produced a RoomActivity default of
+    raw_occupancy=False and the gate could never fire. It now falls to the 1F
+    rollup, which correctly read "on" during all three 2026-08-31 dispatches.
+
+    The occupancy verdict additionally requires the sensor to have been clear
+    for job.occupancy_clear_grace_s (see occupancy_state) — a fresh flip to
+    "off" is not trusted. detected_activity is unaffected by the grace window.
+    """
+    grace = job.occupancy_clear_grace_s
+    zone_info = ctx.zone_info.get(zone_id)
+    signal = resolve_occupancy_signal(
+        job, ctx, zone_meta, (zone_info.room_key if zone_info else None,)
+    )
+
+    # Tier 4 — genuinely no occupancy signal anywhere. Graceful degradation §8.5.
+    if signal is None:
+        return "PASS", "none", f"zone_sensor_unavailable_treat_clear:{zone_id}"
+
+    state, elapsed = occupancy_state(signal.occupied, signal.last_changed, ctx.timestamp, grace)
+
+    if signal.tier == "floor":
+        occupied_reason = f"zone_floor_fallback_occupied:{zone_id}:{signal.label}"
+        unconfirmed_reason = (
+            f"zone_floor_fallback_unconfirmed:{zone_id}:{signal.label}"
+            f":clear_for={_fmt_dwell(elapsed)}s<{grace}s"
+        )
+        source = f"floor:{signal.label}"
+    elif signal.tier == "zone":
+        occupied_reason = f"zone_occupied:{zone_id}:{signal.label}"
+        unconfirmed_reason = (
+            f"zone_occupancy_unconfirmed:{zone_id}:{signal.label}"
+            f":clear_for={_fmt_dwell(elapsed)}s<{grace}s"
+        )
+        source = signal.label
+    else:  # "room" — historic reason string omits the label on the occupied case
+        occupied_reason = f"zone_occupied:{zone_id}"
+        unconfirmed_reason = (
+            f"zone_occupancy_unconfirmed:{zone_id}:{signal.label}"
+            f":clear_for={_fmt_dwell(elapsed)}s<{grace}s"
+        )
+        source = signal.label
+
+    if state == "occupied":
+        return "FAIL", "effectiveness", occupied_reason
+    if state == "clearing":
+        return "FAIL", "effectiveness", unconfirmed_reason
+    return _detected_activity_verdict(zone_id, ctx, source=source)
+
+
+def _detected_activity_verdict(
+    zone_id: int, ctx: ContextSnapshot, source: str
+) -> tuple[str, str, str]:
+    """Second half of R1-E1: block on the room's detected_activity, if we have one.
+
+    Split out so all three occupancy tiers share it. detected_activity is a
+    Bayesian rollup rather than a raw sensor edge, so no grace window applies —
+    it is not subject to the momentary-dropout failure mode.
     """
     zone_info = ctx.zone_info.get(zone_id)
     room_key = zone_info.room_key if zone_info else None
-    if room_key is None:
-        # No parent room sensor (sub-zone or sensor unavailable) — graceful degradation §8.5
-        return "PASS", "none", "zone_sensor_unavailable_treat_clear"
-
-    room = ctx.rooms.get(room_key)
-    if room is None:
-        return "PASS", "none", "zone_sensor_unavailable_treat_clear"
-
-    if room.raw_occupancy:
-        return "FAIL", "effectiveness", f"zone_occupied:{zone_id}"
-
-    if room.detected in _ACTIVE_ROOM_STATES:
+    room = ctx.rooms.get(room_key) if room_key else None
+    if room is not None and room.detected in _ACTIVE_ROOM_STATES:
         return "FAIL", "effectiveness", f"zone_active_use:{zone_id}:activity={room.detected}"
-
-    return "PASS", "none", "zone_clear"
+    return "PASS", "none", f"zone_clear:{source}"
 
 
 def floor_clearance_check(
     job: VacuumJob, zone_id: int, ctx: ContextSnapshot
 ) -> tuple[str, str, str]:
-    """R1-E2: Operating floor must be clear (no raw_occupancy across floor rooms).
+    """R1-E2: Operating floor must be clear.
 
-    Checks every room in FLOOR_ROOM_MAP[job.floor]. The target zone's own
-    occupancy is also covered here for double-safety. Skips rooms whose sensors
-    are unavailable (graceful degradation §4.2).
+    Primary signal is the floor's own dedicated rollup entity from the
+    area_occupancy HACS integration —
+    binary_sensor.{first,second,third}_floor_occupancy_status — read via
+    ctx.floor_occupancy[job.floor].
 
-    Returns FAIL naming the first occupied room.
+    That entity replaces the previous approach of OR-ing every room in
+    FLOOR_ROOM_MAP[job.floor]. Re-deriving the floor state that way duplicates
+    logic HA already owns and, worse, silently omits every room whose
+    convention-named entity does not exist: confirmed live 2026-08-31, HA has no
+    occupancy entity for dining_room, prep_area, loft, carlitos_room,
+    upper_hallway or kids_table_area, so those rooms contributed nothing and the
+    1F "floor clear" verdict was computed from four of six rooms.
+
+    The per-room sweep is RETAINED as a secondary net rather than replaced
+    outright, and runs after the rollup rather than only when the rollup is
+    missing. The bug being fixed is that the sweep was the *only* signal and
+    silently under-reported; a room that positively reports "occupied" is real
+    evidence and is never a silent default, so keeping it can only ever add a
+    block, never suppress one. It also means a dead area_occupancy integration
+    degrades to the old behaviour instead of to "clear".
+
+    Both paths honour job.occupancy_clear_grace_s.
     """
-    floor_rooms = FLOOR_ROOM_MAP.get(job.floor, [])
-    for room_key in floor_rooms:
+    grace = job.occupancy_clear_grace_s
+
+    # Primary — the floor's own rollup entity.
+    floor = _floor_reading(job, ctx)
+    if floor is not None:
+        state, elapsed = occupancy_state(floor.occupied, floor.last_changed, ctx.timestamp, grace)
+        if state == "occupied":
+            return "FAIL", "effectiveness", f"floor_not_clear:{job.floor}:{floor.entity_id}"
+        if state == "clearing":
+            return (
+                "FAIL",
+                "effectiveness",
+                f"floor_occupancy_unconfirmed:{job.floor}:{floor.entity_id}"
+                f":clear_for={_fmt_dwell(elapsed)}s<{grace}s",
+            )
+
+    # Secondary — per-room sweep. Positive occupancy from any room still blocks.
+    for room_key in FLOOR_ROOM_MAP.get(job.floor, []):
         room = ctx.rooms.get(room_key)
         if room is None:
-            # Sensor unavailable — skip this room (don't let missing sensor block)
+            # Sensor unavailable — skip this room (don't let missing sensor block).
+            # Coverage for these rooms now comes from the floor rollup above; that
+            # is precisely the gap this check could never close on its own.
             continue
-        if room.raw_occupancy:
+        state, elapsed = occupancy_state(
+            room.raw_occupancy, room.occupancy_last_changed, ctx.timestamp, grace
+        )
+        if state == "occupied":
             return "FAIL", "effectiveness", f"floor_not_clear:{room_key}"
+        if state == "clearing":
+            return (
+                "FAIL",
+                "effectiveness",
+                f"floor_occupancy_unconfirmed:{room_key}:clear_for={_fmt_dwell(elapsed)}s<{grace}s",
+            )
 
     return "PASS", "none", "floor_clear"
 
@@ -370,7 +610,9 @@ async def run_r1(
       3. Effectiveness occupancy rules — bypassed/narrowed per override mode:
            "none"        → run zone_active_use_check + floor_clearance_check normally
            "full"        → skip both (house empty; no one to disturb)
-           "room_scoped" → skip floor_clearance_check; check ONLY the zone's parent room
+           "room_scoped" → skip floor_clearance_check; resolve the zone's own
+                           occupancy through resolve_occupancy_signal() with the
+                           PARENT room as the tier-2 candidate (spec §6.4)
       3b. Door check (R1-E4) — runs when job.door_check=True, after occupancy gates.
       4. Transit lookahead — ALWAYS runs (not an occupancy gate)
       5. Comfort rules (AMBIGUOUS / PASS-marginal → L1 if job.l1_required or AMBIGUOUS)
@@ -397,40 +639,86 @@ async def run_r1(
 
     elif bypass_mode == "room_scoped":
         # Override 2 — single non-Elena occupant + low_disruption zone.
-        # Floor-wide floor_clearance_check is replaced by a room-level check on the
-        # zone's own parent room (via occupancy_sensor → room key resolver, spec §6.4).
-        # zone_active_use_check checks by zone NAME key; for sub-zones like Litter Box
-        # the correct room is the parent room (hallway), not the zone label — so we skip
-        # zone_active_use_check too and do a single room-level check ourselves.
-        target_room = room_key_for_zone(zone_meta)
+        # Floor-wide floor_clearance_check is replaced by a zone/room-level check.
+        # zone_active_use_check keys tier 2 off ctx.zone_info[zone_id].room_key; for
+        # sub-zones like Litter Box that is None and the correct room is the PARENT
+        # room (hallway, via room_key_for_zone, spec §6.4) — so we run the shared
+        # chain ourselves with the parent room prepended to the tier-2 candidates.
+        #
+        # This branch previously resolved occupancy ONLY through
+        # room_key_for_zone(zone_meta) → ctx.rooms[...], which is the same lossy
+        # round-trip Fix 1 removed from the main gate: the entity id is mapped back
+        # to a room key by suffix-stripping, then a DIFFERENT, convention-named
+        # entity is read. For a zone whose designated sensor no suffix rule recovers
+        # (Dining Table → binary_sensor.emotion_kitchen_dining_table_presence) the
+        # round-trip yields None, ctx.rooms.get(None) is None, and the bypass fell
+        # straight through to dispatch having consulted ZERO occupancy signal —
+        # reproducing the 2026-08-31 incident class on the Override-2 path.
+        # It now reads the designated entity directly (tier 1), then the parent /
+        # own room (tier 2), then the floor rollup (tier 3). Tier 3 only ever runs
+        # when there is no zone- or room-level signal at all, which is precisely the
+        # case where relaxing a floor-wide gate cannot be justified — so Override 2's
+        # purpose (a person on the floor but not in THIS room) is fully preserved.
+        zone_info = ctx.zone_info.get(zone_id)
+        parent_room = room_key_for_zone(zone_meta)
+        signal = resolve_occupancy_signal(
+            job,
+            ctx,
+            zone_meta,
+            (parent_room, zone_info.room_key if zone_info else None),
+        )
+        if signal is not None:
+            # Same confirmation window as the main gate — a relaxed gate is still
+            # a gate, and trusting a 2-second-old "off" here would reopen exactly
+            # the hole this PR closes, just on the single-occupant path.
+            state, elapsed = occupancy_state(
+                signal.occupied,
+                signal.last_changed,
+                ctx.timestamp,
+                job.occupancy_clear_grace_s,
+            )
+            if state == "occupied":
+                return (
+                    "FAIL",
+                    "effectiveness",
+                    f"target_room_occupied:{signal.label}|occ_relax:{bypass_reason_str}",
+                )
+            if state == "clearing":
+                return (
+                    "FAIL",
+                    "effectiveness",
+                    f"target_room_occupancy_unconfirmed:{signal.label}"
+                    f":clear_for={_fmt_dwell(elapsed)}s<{job.occupancy_clear_grace_s}s"
+                    f"|occ_relax:{bypass_reason_str}",
+                )
+        # detected_activity is a Bayesian rollup rather than a raw sensor edge, so
+        # it is checked separately and without a grace window — same split as
+        # _detected_activity_verdict on the main gate.
+        target_room = parent_room or (zone_info.room_key if zone_info else None)
         room = ctx.rooms.get(target_room) if target_room else None
-        if room is not None:
-            if room.raw_occupancy:
-                return (
-                    "FAIL",
-                    "effectiveness",
-                    f"target_room_occupied:{target_room}|occ_relax:{bypass_reason_str}",
-                )
-            if room.detected in _ACTIVE_ROOM_STATES:
-                return (
-                    "FAIL",
-                    "effectiveness",
-                    f"target_room_active:{target_room}:activity={room.detected}|occ_relax:{bypass_reason_str}",
-                )
-        # Room sensor unavailable → treat as clear (graceful degradation §8.5 consistent with
-        # floor_clearance_check which skips unavailable rooms rather than blocking).
+        if room is not None and room.detected in _ACTIVE_ROOM_STATES:
+            return (
+                "FAIL",
+                "effectiveness",
+                f"target_room_active:{target_room}:activity={room.detected}"
+                f"|occ_relax:{bypass_reason_str}",
+            )
+        # No zone, room OR floor signal anywhere → treat as clear (graceful
+        # degradation §8.5, consistent with zone_active_use_check's tier 4).
 
     else:
         # mode == "none" — occupancy gates per job.effectiveness_scope
         if job.effectiveness_scope == "floor":
-            for eff_fn in (zone_active_use_check, floor_clearance_check):
-                result, gate_failed, reason = eff_fn(job, zone_id, ctx)
-                if result == "FAIL":
-                    return result, gate_failed, reason
+            result, gate_failed, reason = zone_active_use_check(job, zone_id, ctx, zone_meta)
+            if result == "FAIL":
+                return result, gate_failed, reason
+            result, gate_failed, reason = floor_clearance_check(job, zone_id, ctx)
+            if result == "FAIL":
+                return result, gate_failed, reason
         elif job.effectiveness_scope == "room_only":
             # Per-room model (Sam 2F): only check the zone's own room occupancy,
             # not the whole floor. floor_clearance_check is skipped.
-            result, gate_failed, reason = zone_active_use_check(job, zone_id, ctx)
+            result, gate_failed, reason = zone_active_use_check(job, zone_id, ctx, zone_meta)
             if result == "FAIL":
                 return result, gate_failed, reason
         # effectiveness_scope == "none": skip both occupancy checks entirely.

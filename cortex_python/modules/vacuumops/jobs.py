@@ -69,6 +69,21 @@ class VacuumJob:
     # If True, R1 runs door_open_check: reads room.door_open from ContextSnapshot.
     # Graceful degradation: door_open=None (sensor missing) → treat as open → PASS.
 
+    occupancy_clear_grace_s: int = 120
+    # Confirmation window (seconds) an occupancy sensor must have been reporting
+    # "off" before the gate will trust it as genuinely clear. ONE-DIRECTIONAL:
+    # it delays *clearing* only. A flip TO occupied blocks dispatch on the very
+    # next tick with zero added latency.
+    #
+    # Why: on 2026-08-31 the Saros dispatched into occupied 1F rooms three times
+    # (10:07:19, 14:06:47, 18:34:34 PST). Every one landed 2–90s after an
+    # occupancy sensor flipped off, and every one saw it flip back on 26–90s
+    # later — e.g. living_room went off at 18:33:38, dispatch fired at 18:34:34,
+    # sensor back on at 18:35:01 (87s of "off" in total). The gate was reading an
+    # instantaneous state with no confirmation window, so a person pausing
+    # between mmWave detections read as an empty room. 120s clears all three.
+    # 0 disables the window (instantaneous trust — pre-2026-08-31 behaviour).
+
     # ── Mop-cadence gate (mop.py) ────────────────────────────────────────────
     # Locked design, 2026-07-03 (D14–D18): "Mop intelligence (Saros only):
     # signal → schedule (7-day) → score threshold → off. Intensity: light/deep."
@@ -140,6 +155,7 @@ class Ethan3FRoomsJob(VacuumJob):
     """
 
     job_id: str = "ethan_3f_rooms"
+    occupancy_clear_grace_s: int = 120
     robot: str = "ethan"
     zones: list[int] = field(default_factory=lambda: [15, 16, 17])
     floor: str = "3F"
@@ -186,6 +202,7 @@ class Saros1FLitterBoxJob(VacuumJob):
     """
 
     job_id: str = "saros_1f_litter_box"
+    occupancy_clear_grace_s: int = 120
     robot: str = "saros"
     zones: list[int] = field(default_factory=lambda: [23])
     floor: str = "1F"
@@ -236,6 +253,7 @@ class Saros1FRoomsJob(VacuumJob):
     """
 
     job_id: str = "saros_1f_rooms"
+    occupancy_clear_grace_s: int = 120
     robot: str = "saros"
     door_check: bool = True
     mop_enabled: bool = True
@@ -286,6 +304,7 @@ class Sam2FJob(VacuumJob):
     """
 
     job_id: str = "sam_2f_rooms"
+    occupancy_clear_grace_s: int = 120
     robot: str = "sam"
     zones: list[int] = field(
         default_factory=lambda: [1, 2, 3, 4, 5, 6]
