@@ -10,6 +10,7 @@ import pytest
 from cortex_python.modules.vacuumops.jobs import Ethan3FLitterBoxJob
 from cortex_python.modules.vacuumops.schemas import (
     ContextSnapshot,
+    OccupancyReading,
     PersonActivity,
     RobotState,
     RoomActivity,
@@ -44,12 +45,42 @@ def make_room(
     confidence: float = 0.8,
     raw_occupancy: bool = False,
     door_open: bool | None = None,
+    occupancy_last_changed: datetime | None = None,
+    occupancy_available: bool = True,
 ) -> RoomActivity:
+    """Build a RoomActivity.
+
+    Defaults to occupancy_available=True — a room fixture stands for a room that
+    really does have a working HA occupancy entity. Pass occupancy_available=False
+    to model the confirmed-live case of a room whose convention-named sensor does
+    not exist (dining_room, prep_area, loft, carlitos_room, upper_hallway,
+    kids_table_area), which must fall through to the floor rollup.
+
+    occupancy_last_changed=None means "clear for an unknown but long time" —
+    the grace window treats it as confirmed clear.
+    """
     return RoomActivity(
         detected=detected,
         confidence=confidence,
         raw_occupancy=raw_occupancy,
         door_open=door_open,
+        occupancy_last_changed=occupancy_last_changed,
+        occupancy_available=occupancy_available,
+    )
+
+
+def make_occupancy(
+    entity_id: str = "binary_sensor.test_occupancy_status",
+    occupied: bool = False,
+    last_changed: datetime | None = None,
+    available: bool = True,
+) -> OccupancyReading:
+    """Build an OccupancyReading for zone- or floor-level occupancy."""
+    return OccupancyReading(
+        entity_id=entity_id,
+        occupied=occupied,
+        last_changed=last_changed,
+        available=available,
     )
 
 
@@ -67,6 +98,8 @@ def make_snapshot(
     home_count: int = -1,
     who_home: list | None = None,
     home_empty: bool = False,
+    occupancy_readings: dict | None = None,
+    floor_occupancy: dict | None = None,
 ) -> ContextSnapshot:
     if timestamp is None:
         timestamp = datetime(2026, 5, 24, 15, 0, 0, tzinfo=timezone.utc)  # 8 AM PST
@@ -139,6 +172,12 @@ def make_snapshot(
             "ethan": make_robot_state(robot_state, battery),
             "sam": make_robot_state("docked", 90),
         },
+        # Default {} for both: the R1 occupancy chain then behaves as it did before
+        # the dedicated entities existed (room sensors, then the FLOOR_ROOM_MAP
+        # fallback), so pre-existing tests exercise the fallback paths unchanged.
+        # Tests targeting the new behaviour pass these explicitly.
+        occupancy_readings=occupancy_readings if occupancy_readings is not None else {},
+        floor_occupancy=floor_occupancy if floor_occupancy is not None else {},
         quiet_hours_1f=quiet_hours_1f,
         quiet_hours_2f=quiet_hours_2f,
         noise_budget=None,

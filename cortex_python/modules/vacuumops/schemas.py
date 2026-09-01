@@ -69,6 +69,29 @@ class PersonActivity:
 
 
 @dataclass
+class OccupancyReading:
+    """A single HA occupancy binary_sensor read, with dwell tracking.
+
+    Distinct from RoomActivity: this is the raw read of one *specific* entity —
+    the entity HomeOps designated for a zone (ZoneMeta.occupancy_sensor) or the
+    area_occupancy floor rollup — rather than a convention-named per-room sensor.
+
+    ``available`` is the field that closes the silent-no-op class of bug: a
+    missing entity must read as "unknown", never as "clear". Callers that see
+    available=False are required to fall through to a coarser signal rather than
+    treat the zone as unoccupied.
+
+    ``last_changed`` carries HA's own state-transition timestamp so the gate can
+    require a confirmation window before trusting a fresh flip to "off".
+    """
+
+    entity_id: str
+    occupied: bool
+    last_changed: datetime | None = None
+    available: bool = True
+
+
+@dataclass
 class RoomActivity:
     """Per-room activity rollup.
 
@@ -81,9 +104,21 @@ class RoomActivity:
     confidence: float  # 0.0–1.0 from the detected_activity sensor
     raw_occupancy: bool
     # binary_sensor.<room>_occupancy_status — instantaneous mmWave/Bayes occupancy.
-    # Apply 90s grace period before treating False as "truly clear".
+    # NOT trustworthy on its own: pair with occupancy_last_changed and the
+    # job's occupancy_clear_grace_s before treating False as "truly clear".
     door_open: bool | None = None
     # binary_sensor.{room}_door state. None = sensor unavailable → treat as open.
+    occupancy_last_changed: datetime | None = None
+    # HA's last_changed on the occupancy entity — when it last flipped on↔off.
+    # None = unknown (sensor absent, or a synthetic RoomActivity in tests); the
+    # grace check treats None as "clear long enough" so a missing timestamp can
+    # never be *more* restrictive than the pre-grace behaviour.
+    occupancy_available: bool = False
+    # True only when a real occupancy entity backed this read. False means
+    # raw_occupancy is a placeholder default, not evidence of an empty room —
+    # zone_active_use_check falls through to the floor sensor rather than
+    # treating the room as clear. Defaults False so that any RoomActivity built
+    # without an explicit occupancy read is correctly treated as "no signal".
 
 
 @dataclass
@@ -173,6 +208,27 @@ class ContextSnapshot:
     # Zone metadata — structural per-zone data fetched from HomeOps each tick
     zone_metadata: dict[int, ZoneMeta] = field(default_factory=dict)
     # keys: zone_id (int). Built by homeops_adapter each tick.
+
+    # Occupancy entity readings, keyed by HA entity_id. Built by the synth from the
+    # distinct set of ZoneMeta.occupancy_sensor values, so zones that share a sensor
+    # share one read. Callers look up by zone_meta.occupancy_sensor — the entity is
+    # read DIRECTLY rather than round-tripped through a room key.
+    occupancy_readings: dict[str, OccupancyReading] = field(default_factory=dict)
+    # Reading the designated entity directly matters: several zones point at
+    # sensors that no naming convention recovers (e.g. Dining Table →
+    # binary_sensor.emotion_kitchen_dining_table_presence). Mapping the entity
+    # back to a room key and then reading binary_sensor.{room}_occupancy_status
+    # reads a *different* entity — one that, for dining_room, does not exist.
+
+    # Per-floor occupancy — the area_occupancy HACS integration's own floor rollup.
+    floor_occupancy: dict[str, OccupancyReading] = field(default_factory=dict)
+    # keys: "1F" | "2F" | "3F" → binary_sensor.{first,second,third}_floor_occupancy_status.
+    # This is the authoritative floor signal and the last-resort fallback for any
+    # zone whose own occupancy sensor is unset or unavailable. Preferred over
+    # OR-ing the per-room sensors in FLOOR_ROOM_MAP, which silently omits every
+    # room whose convention-named entity does not exist (confirmed live: no
+    # dining_room / prep_area / loft / carlitos_room / upper_hallway /
+    # kids_table_area occupancy entity exists in HA).
 
     # Derived (computed once when snapshot is built)
     noise_budget: float | None = None

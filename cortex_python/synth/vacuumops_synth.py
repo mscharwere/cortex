@@ -32,9 +32,11 @@ from cortex_python.modules.vacuumops.noise import noise_budget
 from cortex_python.modules.vacuumops.schemas import (
     CalendarEvent,
     ContextSnapshot,
+    OccupancyReading,
     PersonActivity,
     RobotState,
     RoomActivity,
+    ZoneMeta,
 )
 
 if TYPE_CHECKING:
@@ -97,6 +99,24 @@ _DOOR_ENTITY_MAP: dict[str, str] = {
 }
 
 
+# Dedicated per-floor occupancy rollups from the area_occupancy HACS integration
+# (custom_components/area_occupancy). These are purpose-built floor-level signals
+# maintained by HA itself; CORTEX previously ignored them and re-derived floor
+# state by OR-ing the per-room sensors in FLOOR_ROOM_MAP, which silently omitted
+# every room with no convention-named entity. Verified live 2026-08-31: all three
+# exist, all three carry device_class=occupancy and a real last_changed.
+_FLOOR_OCCUPANCY_ENTITY: dict[str, str] = {
+    "1F": "binary_sensor.first_floor_occupancy_status",
+    "2F": "binary_sensor.second_floor_occupancy_status",
+    "3F": "binary_sensor.third_floor_occupancy_status",
+}
+
+# HA binary_sensor state strings that mean "occupied". Kept identical to the
+# set _fetch_room_activity has always used, so this refactor introduces no
+# parsing drift alongside the behavioural changes.
+_OCCUPIED_STATES = ("on", "true", "1")
+
+
 def _safe_float(val: Any, default: float = 0.0) -> float:
     try:
         return float(val)
@@ -109,6 +129,91 @@ def _safe_int(val: Any, default: int = 0) -> int:
         return int(val)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_last_changed(state: dict[str, Any] | None) -> datetime | None:
+    """Extract HA's last_changed off a state payload as an aware-UTC datetime.
+
+    Every HA state carries last_changed — the timestamp of the last state
+    *transition* (as opposed to last_updated, which also moves on attribute-only
+    churn). That distinction is exactly what the occupancy confirmation window
+    needs: how long the sensor has actually been reporting its current value.
+
+    Returns None on absence or unparseable input; callers treat None as "dwell
+    unknown", never as "occupied".
+    """
+    if not state:
+        return None
+    raw = state.get("last_changed")
+    if not isinstance(raw, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        log.warning("ha_last_changed_parse_failed", raw=raw)
+        return None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+async def _fetch_occupancy_reading(ha_adapter: HARestAdapter, entity_id: str) -> OccupancyReading:
+    """Read one occupancy binary_sensor directly, preserving availability + dwell.
+
+    A missing or unavailable entity yields available=False — NOT occupied=False.
+    The distinction is the whole point: the gate must fall through to a coarser
+    signal on an absent sensor rather than reading absence as an empty room.
+    """
+    state = await ha_adapter.get_entity_state(entity_id)
+    if state is None:
+        return OccupancyReading(entity_id=entity_id, occupied=False, available=False)
+    return OccupancyReading(
+        entity_id=entity_id,
+        occupied=str(state.get("state", "off")).lower() in _OCCUPIED_STATES,
+        last_changed=_parse_last_changed(state),
+        available=True,
+    )
+
+
+async def _fetch_floor_occupancy(ha_adapter: HARestAdapter) -> dict[str, OccupancyReading]:
+    """Read the three area_occupancy floor rollups. Keys: "1F" | "2F" | "3F"."""
+    out: dict[str, OccupancyReading] = {}
+    for floor, entity_id in _FLOOR_OCCUPANCY_ENTITY.items():
+        try:
+            out[floor] = await _fetch_occupancy_reading(ha_adapter, entity_id)
+        except Exception as exc:
+            log.warning("floor_occupancy_fetch_failed", floor=floor, error=str(exc))
+            out[floor] = OccupancyReading(entity_id=entity_id, occupied=False, available=False)
+    return out
+
+
+async def _fetch_occupancy_readings(
+    ha_adapter: HARestAdapter, zone_metadata: dict[int, ZoneMeta]
+) -> dict[str, OccupancyReading]:
+    """Read every HomeOps-designated occupancy_sensor entity directly.
+
+    Returns a map keyed by entity_id, so zones that legitimately share a sensor
+    (all three Ethan kitchen zones point at the same presence sensor; the litter
+    box shares the hallway group) cost one HA call between them — typically ~6
+    calls, not one per zone. R1 looks up by zone_meta.occupancy_sensor.
+
+    Reading the designated entity *directly* is the correction here. The previous
+    code path recovered a room key from the entity id by stripping a known suffix
+    and then read binary_sensor.{room}_occupancy_status — a different entity, and
+    for several zones one that does not exist. The designated sensors that no
+    suffix rule recovers are real and live (verified 2026-08-31), e.g.
+    binary_sensor.emotion_kitchen_dining_table_presence and
+    binary_sensor.master_bedroom_emotion_any_presence.
+    """
+    out: dict[str, OccupancyReading] = {}
+    for meta in zone_metadata.values():
+        entity_id = meta.occupancy_sensor
+        if not entity_id or entity_id in out:
+            continue
+        try:
+            out[entity_id] = await _fetch_occupancy_reading(ha_adapter, entity_id)
+        except Exception as exc:
+            log.warning("zone_occupancy_fetch_failed", entity_id=entity_id, error=str(exc))
+            out[entity_id] = OccupancyReading(entity_id=entity_id, occupied=False, available=False)
+    return out
 
 
 async def _fetch_person_activity(ha_adapter: HARestAdapter, name: str) -> PersonActivity:
@@ -153,15 +258,23 @@ async def _fetch_room_activity(ha_adapter: HARestAdapter, room: str) -> RoomActi
 
     if occ_state is None and act_state is None:
         # No occupancy data — but surface door state if available so the door gate fires.
+        # occupancy_available stays False: raw_occupancy=False here is a placeholder,
+        # not evidence the room is empty, and the gate must fall through to the floor.
         if door_open is not None:
             return RoomActivity(
-                detected="unknown", confidence=0.0, raw_occupancy=False, door_open=door_open
+                detected="unknown",
+                confidence=0.0,
+                raw_occupancy=False,
+                door_open=door_open,
+                occupancy_available=False,
             )
         return None
 
     raw_occupancy = False
+    occupancy_last_changed: datetime | None = None
     if occ_state is not None:
-        raw_occupancy = occ_state.get("state", "off").lower() in ("on", "true", "1")
+        raw_occupancy = str(occ_state.get("state", "off")).lower() in _OCCUPIED_STATES
+        occupancy_last_changed = _parse_last_changed(occ_state)
 
     detected = "unknown"
     confidence = 0.0
@@ -182,6 +295,8 @@ async def _fetch_room_activity(ha_adapter: HARestAdapter, room: str) -> RoomActi
         confidence=confidence,
         raw_occupancy=raw_occupancy,
         door_open=door_open,
+        occupancy_last_changed=occupancy_last_changed,
+        occupancy_available=occ_state is not None,
     )
 
 
@@ -375,7 +490,12 @@ async def build_snapshot(
     # Rooms without HA sensors (e.g. 3F: loft, office, gym) previously returned
     # None from _fetch_room_activity and were silently skipped — now they get a
     # safe default so the template layer always has a complete mapping.
-    _room_default = RoomActivity(detected="unknown", confidence=0.0, raw_occupancy=False)
+    # occupancy_available=False on the default: a room with no HA sensor must read
+    # as "no signal", not as "empty". zone_active_use_check falls through to the
+    # floor rollup for these rather than passing them as clear.
+    _room_default = RoomActivity(
+        detected="unknown", confidence=0.0, raw_occupancy=False, occupancy_available=False
+    )
     rooms: dict[str, RoomActivity] = {}
     for room in _TRACKED_ROOMS:
         try:
@@ -385,6 +505,25 @@ async def build_snapshot(
             log.warning("room_activity_fetch_failed", room=room, error=str(exc))
             rooms[room] = _room_default
             degraded = True
+
+    # ── Occupancy — floor rollups + per-zone designated sensors ───────────────
+    # Read as dedicated entities rather than derived from ctx.rooms. Both feed the
+    # R1 occupancy precedence chain (zone sensor → room sensor → floor rollup) and
+    # both carry last_changed so the gate can require a confirmation window before
+    # trusting a fresh flip to "off".
+    try:
+        floor_occupancy = await _fetch_floor_occupancy(ha_adapter)
+    except Exception as exc:
+        log.warning("floor_occupancy_fetch_failed", error=str(exc))
+        floor_occupancy = {}
+        degraded = True
+
+    try:
+        occupancy_readings = await _fetch_occupancy_readings(ha_adapter, zone_metadata)
+    except Exception as exc:
+        log.warning("zone_occupancy_fetch_failed", error=str(exc))
+        occupancy_readings = {}
+        degraded = True
 
     # ── Robots ────────────────────────────────────────────────────────────────
     robot_states: dict[str, RobotState] = {}
@@ -426,6 +565,8 @@ async def build_snapshot(
         zone_scores=zone_scores,
         zone_info=zone_info,
         zone_metadata=zone_metadata,
+        occupancy_readings=occupancy_readings,
+        floor_occupancy=floor_occupancy,
         upcoming_events=upcoming_events,
         robot_states=robot_states,
         quiet_hours_1f=quiet_hours_1f,

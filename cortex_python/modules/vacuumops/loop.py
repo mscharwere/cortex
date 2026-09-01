@@ -390,7 +390,10 @@ def _zone_effective_simple(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -
     """Quick effectiveness check for bundle sweep (D11)."""
     from cortex_python.modules.vacuumops.r1 import floor_clearance_check, zone_active_use_check
 
-    result, _, _ = zone_active_use_check(job, zone_id, ctx)
+    # Pass zone_meta so the bundle sweep resolves occupancy through the same
+    # precedence chain as the main gate — a bundled zone bypasses L1 entirely,
+    # so it must not be held to a weaker effectiveness standard than a primary.
+    result, _, _ = zone_active_use_check(job, zone_id, ctx, ctx.zone_metadata.get(zone_id))
     if result == "FAIL":
         return False
     result, _, _ = floor_clearance_check(job, zone_id, ctx)
