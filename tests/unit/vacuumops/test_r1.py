@@ -252,13 +252,16 @@ def test_noise_budget_check_ambiguous_marginal():
     assert result in ("PASS", "AMBIGUOUS")  # not a hard FAIL from living room alone
 
 
-def test_noise_budget_check_fail_quiet_hours_1f(litter_box_job):
-    """Quiet hours 1F active → reduced budget → check FAIL behavior."""
+def test_noise_budget_check_quiet_hours_1f_no_longer_reduces_budget(litter_box_job):
+    """quiet_hours_1f no longer reduces the budget at all (removed 2026-08-11).
+
+    budget = 10.0 (unreduced); impact = 1.0 → PASS-strong (1.0 ≤ 10.0 * 0.7 = 7.0).
+    Previously asserted budget 4.0 via the blanket ×0.40 penalty.
+    """
     ctx = make_snapshot(quiet_hours_1f=True)
-    # budget = 10 * 0.4 = 4.0; impact = 1.0 → PASS-strong (1.0 ≤ 4.0 * 0.7 = 2.8)
     result, gate, reason = noise_budget_check(litter_box_job, "Litter Box", ctx)
-    # With just quiet_hours_1f, budget is still 4.0 — impact 1.0 passes strongly
     assert result == "PASS"
+    assert "budget=10.00" in reason
 
 
 # ── noise_radius_check ────────────────────────────────────────────────────────

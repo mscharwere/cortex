@@ -96,11 +96,24 @@ def test_noise_budget_piano_active(clean_ctx):
     assert result == pytest.approx(0.5)
 
 
-def test_noise_budget_quiet_hours_1f(clean_ctx):
-    """Quiet hours 1F → budget = 10 * 0.4 = 4.0."""
+def test_noise_budget_quiet_hours_1f_applies_no_penalty(clean_ctx):
+    """quiet_hours_1f alone must NOT reduce the budget → stays 10.0.
+
+    Regression guard for the 2026-08-11 removal of the blanket 1F quiet-hours
+    penalty. The floor-aware sleep model already holds that ground-floor sound
+    doesn't reach the 2F bedrooms, and real 1F presence at night is handled by
+    the occupancy gates, not by the noise budget.
+    """
     clean_ctx.quiet_hours_1f = True
     result = noise_budget(clean_ctx, "1F")
-    assert result == pytest.approx(4.0)
+    assert result == pytest.approx(10.0)
+
+
+def test_noise_budget_quiet_hours_1f_does_not_affect_other_floors(clean_ctx):
+    """The removed penalty was 1F-scoped; 2F/3F budgets were never its business."""
+    clean_ctx.quiet_hours_1f = True
+    assert noise_budget(clean_ctx, "2F") == pytest.approx(10.0)
+    assert noise_budget(clean_ctx, "3F") == pytest.approx(10.0)
 
 
 def test_noise_budget_sleep_active_2f_floor(clean_ctx):
@@ -165,13 +178,18 @@ def test_noise_budget_near_term_event(clean_ctx):
 
 
 def test_noise_budget_multiplicative(clean_ctx):
-    """Multiple constraints multiply: piano + quiet_1f = 10 * 0.05 * 0.4 = 0.2."""
+    """Multiple constraints multiply: piano + cooking = 10 * 0.05 * 0.30 = 0.15.
+
+    Previously paired piano with quiet_hours_1f; that penalty was removed
+    2026-08-11, so this now pairs piano with cooking to keep exercising the
+    multiplicative stacking itself rather than any one reducer.
+    """
     clean_ctx.people["elena"] = PersonActivity(
         activity="home_idle", confidence=0.9, piano=True
     )
-    clean_ctx.quiet_hours_1f = True
+    clean_ctx.rooms["kitchen"] = make_room("cooking", confidence=0.9)
     result = noise_budget(clean_ctx, "1F")
-    assert result == pytest.approx(0.2)
+    assert result == pytest.approx(0.15)
 
 
 # ── Spec §6.5 Worked Examples ─────────────────────────────────────────────────

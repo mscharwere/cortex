@@ -82,6 +82,9 @@ def noise_budget(ctx: ContextSnapshot, floor: str) -> float:
       - 1F jobs receive only a mild reduction (×0.80) — sound from the ground
         floor does not meaningfully reach 2F bedrooms.
 
+    Consistent with that distance model, 1F carries no separate blanket
+    quiet-hours penalty; see the note in the body.
+
     Spec: §6.3
     """
     budget = 10.0  # start fully open
@@ -105,9 +108,16 @@ def noise_budget(ctx: ContextSnapshot, floor: str) -> float:
         else:
             budget *= 0.80  # 1F: sound doesn't reach 2F; mild reduction only
 
-    # Quiet hours 1F (10pm–7am) — daytime suppression for 1F jobs
-    if ctx.quiet_hours_1f:
-        budget *= 0.40
+    # NOTE: there is deliberately NO blanket quiet-hours penalty for 1F.
+    # A standalone `if ctx.quiet_hours_1f: budget *= 0.40` used to sit here and
+    # was removed 2026-08-11 — it contradicted the floor-aware model directly
+    # above, which holds that ground-floor sound does not meaningfully reach the
+    # 2F bedrooms (hence the mild ×0.80 rather than a block). Applying a further
+    # flat ×0.40 for 10pm–7am re-imposed the distance-based suppression that the
+    # ×0.80 had just decided was unwarranted, unconditional on whether anyone was
+    # actually on 1F. It was also redundant: real 1F presence at night is already
+    # caught by the occupancy gates (zone_active_use_check / floor_clearance_check),
+    # which is the correct place for a presence question.
 
     # Active cooking — kitchen detected_activity == "cooking"
     kitchen = ctx.rooms.get("kitchen")
