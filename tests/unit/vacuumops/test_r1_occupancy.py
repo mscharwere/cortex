@@ -446,6 +446,192 @@ async def test_room_scoped_override_also_honours_the_window(mock_redis):
     assert "target_room_occupancy_unconfirmed" in reason
 
 
+# ── ARIIA finding 1: Override 2 runs the SAME resolution chain ────────────────
+#
+# The room_scoped bypass previously resolved occupancy only through
+# room_key_for_zone(zone_meta) → ctx.rooms[...] — the lossy round-trip Fix 1
+# removed from the main gate. For a zone whose designated sensor no suffix rule
+# recovers, that yields None and the bypass dispatched having consulted ZERO
+# occupancy signal, reproducing the 2026-08-31 incident class on the
+# single-occupant path. These tests pin the chain onto that branch.
+
+
+@pytest.mark.asyncio
+async def test_room_scoped_override_reads_designated_sensor(mock_redis):
+    """ARIIA's exact reproduction: designated sensor AND floor rollup both occupied.
+
+    Dining Table's designated entity is
+    binary_sensor.emotion_kitchen_dining_table_presence — room_key_for_zone()
+    cannot recover a room key from it, and dining_room has no HA entity either.
+    Before the fix this returned PASS/dispatch into a room two independent live
+    signals said was occupied.
+    """
+    meta = ZoneMeta(
+        zone_id=_DINING_ZONE,
+        unit_id=4,
+        occupancy_sensor=_DINING_SENSOR,
+        low_disruption=True,
+    )
+    ctx = _saros_ctx(home_count=1, who_home=["Carlos"])
+    ctx.occupancy_readings[_DINING_SENSOR] = make_occupancy(
+        _DINING_SENSOR, occupied=True, last_changed=_ago(60)
+    )
+    ctx.floor_occupancy["1F"] = _floor_1f(occupied=True, clear_for_s=60)
+    # The old resolution path really does come up empty for this zone.
+    from cortex_python.modules.vacuumops.r1 import room_key_for_zone
+
+    assert room_key_for_zone(meta) is None
+
+    result, gate, reason = await run_r1(
+        Saros1FRoomsJob(),
+        _DINING_ZONE,
+        ctx,
+        mock_redis,
+        zone_meta=meta,
+        bypass_mode="room_scoped",
+        bypass_reason_str="single_person_low_disruption",
+    )
+    assert result == "FAIL", reason
+    assert gate == "effectiveness"
+    assert "target_room_occupied" in reason
+    assert _DINING_SENSOR in reason
+
+
+@pytest.mark.asyncio
+async def test_room_scoped_override_honours_the_window_on_the_designated_sensor(mock_redis):
+    """Tier 1 under Override 2 is subject to the same one-directional grace window."""
+    meta = ZoneMeta(
+        zone_id=_DINING_ZONE,
+        unit_id=4,
+        occupancy_sensor=_DINING_SENSOR,
+        low_disruption=True,
+    )
+    ctx = _saros_ctx(home_count=1, who_home=["Carlos"])
+    ctx.occupancy_readings[_DINING_SENSOR] = make_occupancy(
+        _DINING_SENSOR, occupied=False, last_changed=_ago(20)
+    )
+    result, gate, reason = await run_r1(
+        Saros1FRoomsJob(),
+        _DINING_ZONE,
+        ctx,
+        mock_redis,
+        zone_meta=meta,
+        bypass_mode="room_scoped",
+        bypass_reason_str="single_person_low_disruption",
+    )
+    assert result == "FAIL", reason
+    assert gate == "effectiveness"
+    assert "target_room_occupancy_unconfirmed" in reason
+    assert "clear_for=20s<120s" in reason
+
+
+@pytest.mark.asyncio
+async def test_room_scoped_override_falls_back_to_floor_when_no_zone_or_room_signal(
+    mock_redis,
+):
+    """Tier 3 under Override 2: zero zone/room signal cannot justify relaxing.
+
+    Saros zones carry a NULL occupancy_sensor in HomeOps today, so a
+    low_disruption Saros zone with no working room sensor is exactly this case.
+    Before the fix it dispatched unconditionally.
+    """
+    meta = ZoneMeta(zone_id=_DINING_ZONE, unit_id=4, occupancy_sensor=None, low_disruption=True)
+    ctx = _saros_ctx(home_count=1, who_home=["Carlos"])
+    ctx.floor_occupancy["1F"] = _floor_1f(occupied=True, clear_for_s=60)
+    result, gate, reason = await run_r1(
+        Saros1FRoomsJob(),
+        _DINING_ZONE,
+        ctx,
+        mock_redis,
+        zone_meta=meta,
+        bypass_mode="room_scoped",
+        bypass_reason_str="single_person_low_disruption",
+    )
+    assert result == "FAIL", reason
+    assert gate == "effectiveness"
+    assert "target_room_occupied:1F" in reason
+
+
+@pytest.mark.asyncio
+async def test_room_scoped_override_still_relaxes_when_its_own_room_is_clear(mock_redis):
+    """The hardening must not gut Override 2 — the rollup is tier 3, never tier 1.
+
+    The sole occupant is on 1F, so the 1F rollup reads occupied. That is the
+    precise situation Override 2 exists for: a settled-clear signal on the zone
+    itself still wins, and the relaxation survives.
+    """
+    meta = ZoneMeta(
+        zone_id=_DINING_ZONE,
+        unit_id=4,
+        occupancy_sensor=_DINING_SENSOR,
+        low_disruption=True,
+    )
+    ctx = _saros_ctx(home_count=1, who_home=["Carlos"])
+    ctx.occupancy_readings[_DINING_SENSOR] = make_occupancy(
+        _DINING_SENSOR, occupied=False, last_changed=_ago(1800)
+    )
+    ctx.floor_occupancy["1F"] = _floor_1f(occupied=True, clear_for_s=60)
+    result, _, reason = await run_r1(
+        Saros1FRoomsJob(),
+        _DINING_ZONE,
+        ctx,
+        mock_redis,
+        zone_meta=meta,
+        bypass_mode="room_scoped",
+        bypass_reason_str="single_person_low_disruption",
+    )
+    assert result == "PASS", reason
+    assert "occ_bypass:single_person_low_disruption" in reason
+
+
+def test_override_2_and_main_gate_share_one_resolver():
+    """The docstring claim is now structural, not aspirational.
+
+    Both call sites resolve through resolve_occupancy_signal, so a tier added or
+    reordered in one is added or reordered in the other by construction.
+    """
+    import inspect
+
+    from cortex_python.modules.vacuumops import r1
+
+    assert "resolve_occupancy_signal(" in inspect.getsource(r1.zone_active_use_check)
+    assert "resolve_occupancy_signal(" in inspect.getsource(r1.run_r1)
+
+
+# ── ARIIA finding 3: dwell rendering must agree with the comparison ───────────
+
+
+def test_fmt_dwell_truncates_rather_than_rounds():
+    from cortex_python.modules.vacuumops.r1 import _fmt_dwell
+
+    assert _fmt_dwell(119.6) == "119"
+    assert _fmt_dwell(119.0) == "119"
+    assert _fmt_dwell(0.4) == "0"
+    assert _fmt_dwell(None) == "?"
+
+
+def test_reason_string_never_renders_a_self_contradicting_dwell():
+    """119.6s < 120s must not print as clear_for=120s<120s."""
+    ctx = _saros_ctx()
+    ctx.floor_occupancy["1F"] = _floor_1f(occupied=False, clear_for_s=119.6)
+    result, _, reason = floor_clearance_check(Saros1FRoomsJob(), _KITCHEN_ZONE, ctx)
+    assert result == "FAIL"
+    assert "clear_for=119s<120s" in reason
+    assert "clear_for=120s<120s" not in reason
+
+
+def test_zone_tier_reason_string_also_truncates():
+    ctx = _saros_ctx()
+    ctx.occupancy_readings[_KITCHEN_SENSOR] = make_occupancy(
+        _KITCHEN_SENSOR, occupied=False, last_changed=_ago(119.9)
+    )
+    result, _, reason = zone_active_use_check(
+        Saros1FRoomsJob(), _KITCHEN_ZONE, ctx, _meta(_KITCHEN_ZONE, _KITCHEN_SENSOR)
+    )
+    assert result == "FAIL"
+    assert "clear_for=119s<120s" in reason
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Synth-layer parsing — the source of last_changed and availability.
 #
