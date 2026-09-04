@@ -50,6 +50,12 @@ from cortex_python.modules.vacuumops.jobs import (
 )
 from cortex_python.modules.vacuumops.l1 import L1Decision, resolve_params, resolve_zone_meta, run_l1
 from cortex_python.modules.vacuumops.mop import resolve_batch_mop
+from cortex_python.modules.vacuumops.priors import (
+    BACKFILL_DONE_KEY,
+    PriorLearner,
+    PriorStore,
+)
+from cortex_python.modules.vacuumops.priors_backfill import backfill_priors
 from cortex_python.modules.vacuumops.r0 import _ZONE_COOLDOWN_KEY as _R0_ZONE_COOLDOWN_KEY
 from cortex_python.modules.vacuumops.r0 import run_r0
 from cortex_python.modules.vacuumops.r1 import _ROBOT_COOLDOWN_KEY as _R1_ROBOT_COOLDOWN_KEY
@@ -925,6 +931,64 @@ def next_interval(
     return 60
 
 
+# ── Occupancy prior learner (spec §4.2 / PR A1) ───────────────────────────────
+
+
+async def _maybe_run_prior_backfill(
+    store: PriorStore,
+    ha_adapter: Any,
+    redis_client: aioredis.Redis,
+    cfg: VacuumOpsConfig,
+    now: datetime,
+) -> None:
+    """Run the one-time HA-history seed, once per deployment. Never raises.
+
+    Guarded by a Redis flag purely to avoid re-reading weeks of history on every
+    process restart — the backfill is idempotent regardless (observations dedupe
+    on their slot-start instant, and a backfilled sample can never overwrite a
+    native one), so a lost flag costs HA reads, not correctness.
+
+    A failure here is logged loudly and swallowed: the backfill removes the
+    learner's cold start, it is not a dependency of it. §4.2 — "the PR still
+    merges and the learner starts cold".
+    """
+    try:
+        already = await redis_client.get(BACKFILL_DONE_KEY)
+    except Exception as exc:
+        log.warning("prior_backfill_flag_read_failed", error=str(exc))
+        already = None
+    if already:
+        return
+
+    try:
+        report = await backfill_priors(
+            store,
+            ha_adapter,
+            entities=list(cfg.prior_learner_entities),
+            now=now,
+            lookback_days=cfg.prior_learner_backfill_days,
+            chunk_days=cfg.prior_learner_backfill_chunk_days,
+            slot_minutes=cfg.prior_learner_slot_minutes,
+        )
+    except Exception as exc:
+        log.error("prior_backfill_failed", error=str(exc))
+        return
+
+    if not report.ok:
+        # Do NOT set the done-flag: nothing was seeded, so a retry on the next
+        # restart is worth the reads. An HA that was merely unreachable at boot
+        # would otherwise leave the table permanently cold.
+        log.warning(
+            "prior_backfill_seeded_nothing",
+            entities_failed=report.entities_failed,
+            slots_no_data=report.slots_no_data,
+        )
+        return
+
+    with contextlib.suppress(Exception):
+        await redis_client.set(BACKFILL_DONE_KEY, now.isoformat())
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 
@@ -960,9 +1024,34 @@ async def vacuumops_loop(settings: Settings) -> None:
     # Module config — dry-run sourced from settings
     vacuumops_cfg = build_vacuumops_config(settings)
 
+    # Occupancy prior learner (spec §4.2 / PR A1). Writes cortex_occupancy_priors;
+    # nothing reads it until PR A2's opportunity() lands, so this changes no
+    # dispatch decision. It ships first because its sample clock is wall-clock
+    # bound and everything else in the train is engineering time.
+    prior_store = PriorStore(
+        db_session_factory,
+        slot_minutes=vacuumops_cfg.prior_learner_slot_minutes,
+        retention=vacuumops_cfg.prior_learner_retention,
+        min_slot_samples=vacuumops_cfg.opportunity_min_slot_samples,
+    )
+    prior_learner = PriorLearner(
+        prior_store,
+        ha_adapter,
+        redis_client,
+        entities=list(vacuumops_cfg.prior_learner_entities),
+        slot_minutes=vacuumops_cfg.prior_learner_slot_minutes,
+        max_catchup_slots=vacuumops_cfg.prior_learner_max_catchup_slots,
+        max_lookback_days=vacuumops_cfg.prior_learner_backfill_days,
+    )
+    if vacuumops_cfg.prior_learner_enabled:
+        await _maybe_run_prior_backfill(
+            prior_store, ha_adapter, redis_client, vacuumops_cfg, datetime.now(tz=UTC)
+        )
+
     log.info(
         "vacuumops_loop.started",
         dry_run=vacuumops_cfg.dry_run,
+        prior_learner_enabled=vacuumops_cfg.prior_learner_enabled,
         # mop_enabled is no longer static config — it's read fresh from HomeOps
         # every tick (see live_mop_enabled below), so there is nothing meaningful
         # to log at startup beyond the source.
@@ -983,6 +1072,24 @@ async def vacuumops_loop(settings: Settings) -> None:
         try:
             # Load patterns (hot-reload on mtime change)
             patterns = _load_patterns()
+
+            # Occupancy prior learner slot close-out (spec §4.2 / PR A1).
+            #
+            # Runs BEFORE the snapshot build, deliberately: it shares no state
+            # with the snapshot, and a snapshot failure `continue`s the tick —
+            # placing the learner after it would let a degraded HomeOps stall a
+            # calendar-bound sample clock that has nothing to do with HomeOps.
+            #
+            # A tick crosses a 30-minute boundary at most once (the longest
+            # cadence is 300 s), so this is a no-op on ~29 of every 30 minutes of
+            # ticks and does no I/O at all on those. Wrapped despite
+            # close_out_due_slots() being internally defensive — nothing in an
+            # observability feature may ever kill a dispatch tick.
+            if vacuumops_cfg.prior_learner_enabled:
+                try:
+                    await prior_learner.close_out_due_slots(tick_start)
+                except Exception as exc:
+                    log.error("prior_learner_tick_failed", tick_id=tick_id, error=str(exc))
 
             # Build snapshot
             # build_snapshot returns (ctx, unit_dry_runs, live_mop_enabled):
