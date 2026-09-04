@@ -96,6 +96,42 @@ def test_noise_budget_piano_active(clean_ctx):
     assert result == pytest.approx(0.5)
 
 
+def test_noise_budget_carlos_in_meeting_3f(clean_ctx):
+    """Carlos in meeting, 3F job → budget = 10 * 0.05 = 0.5 (below dispatch bar)."""
+    clean_ctx.home["carlos_in_meeting"] = True
+    result = noise_budget(clean_ctx, "3F")
+    assert result == pytest.approx(0.5)
+
+
+def test_noise_budget_carlos_not_in_meeting_3f(clean_ctx):
+    """Carlos NOT in meeting, 3F job → budget stays fully open (above dispatch bar)."""
+    clean_ctx.home["carlos_in_meeting"] = False
+    result = noise_budget(clean_ctx, "3F")
+    assert result == pytest.approx(10.0)
+
+
+def test_carlos_in_meeting_absent_key_is_a_correct_noop(clean_ctx):
+    """The reducer must not need the key to exist — a pre-rollout ctx.home
+    (no carlos_in_meeting attribute yet) must behave exactly like 'off'.
+    This is what makes C2 correct-and-inert while Ethan is still dark (D5)."""
+    assert "carlos_in_meeting" not in clean_ctx.home
+    result = noise_budget(clean_ctx, "3F")
+    assert result == pytest.approx(10.0)
+
+
+def test_carlos_in_meeting_does_not_reduce_1f_budget(clean_ctx):
+    """Regression guard: the cortex#46 floor-leak shape — a floor-scoped
+    reducer must not leak onto other floors. 1F must be bit-for-bit unchanged."""
+    clean_ctx.home["carlos_in_meeting"] = True
+    assert noise_budget(clean_ctx, "1F") == pytest.approx(10.0)
+
+
+def test_carlos_in_meeting_does_not_reduce_2f_budget(clean_ctx):
+    """Same regression guard for 2F."""
+    clean_ctx.home["carlos_in_meeting"] = True
+    assert noise_budget(clean_ctx, "2F") == pytest.approx(10.0)
+
+
 def test_noise_budget_quiet_hours_1f(clean_ctx):
     """Quiet hours 1F, 1F job → budget = 10 * 0.4 = 4.0."""
     clean_ctx.quiet_hours_1f = True
@@ -308,6 +344,57 @@ def test_ethan_3f_rooms_overnight_still_blocked_after_split(clean_ctx):
     assert noise_budget(clean_ctx, "3F") == pytest.approx(0.8)
     result, gate, reason = noise_budget_check(job, 10, clean_ctx)
     assert result == "FAIL"
+
+
+# ── C2 (D5): carlos_in_meeting reducer — dispatch-suppressing, not blocking ────
+
+
+def test_carlos_in_meeting_suppresses_ethan_3f_rooms_dispatch(clean_ctx):
+    """Meeting on, 3F job → comfort-tier FAIL naming the meeting as the cause.
+
+    Ethan3FRoomsJob: noise_level=2, floor radius, no occupied 3F rooms →
+    impact = 2 * (1 + 0.5 * 0) = 2.0. budget = 10 * 0.05 = 0.5. 2.0 > 0.5 → FAIL.
+    Confirms the reducer actually changes dispatch behaviour, and that it is
+    suppression on the comfort tier (gate == "comfort"), never a hard block of
+    the effectiveness gate.
+    """
+    from cortex_python.modules.vacuumops.jobs import Ethan3FRoomsJob
+    from cortex_python.modules.vacuumops.r1 import noise_budget_check
+
+    job = Ethan3FRoomsJob()
+    clean_ctx.home["carlos_in_meeting"] = True
+
+    result, gate, reason = noise_budget_check(job, 15, clean_ctx)
+    assert result == "FAIL"
+    assert gate == "comfort"
+    assert reason == "carlos_in_meeting_active"
+
+
+def test_carlos_not_in_meeting_ethan_3f_rooms_dispatches_normally(clean_ctx):
+    """Meeting off (default clean_ctx) → the same job passes noise normally.
+
+    Establishes the "above the dispatch bar when off" half of the C2 test bar.
+    """
+    from cortex_python.modules.vacuumops.jobs import Ethan3FRoomsJob
+    from cortex_python.modules.vacuumops.r1 import noise_budget_check
+
+    job = Ethan3FRoomsJob()
+    result, gate, reason = noise_budget_check(job, 15, clean_ctx)
+    assert result == "PASS"
+    assert gate == "none"
+
+
+def test_carlos_in_meeting_does_not_touch_1f_dispatch(clean_ctx):
+    """A meeting must not suppress a concurrent 1F dispatch — floor-scoped only."""
+    from cortex_python.modules.vacuumops.jobs import Saros1FRoomsJob
+    from cortex_python.modules.vacuumops.r1 import noise_budget_check
+
+    job = Saros1FRoomsJob()
+    clean_ctx.home["carlos_in_meeting"] = True
+
+    result, gate, reason = noise_budget_check(job, 21, clean_ctx)
+    assert result == "PASS"
+    assert gate == "none"
 
 
 # ── Spec §6.5 Worked Examples ─────────────────────────────────────────────────

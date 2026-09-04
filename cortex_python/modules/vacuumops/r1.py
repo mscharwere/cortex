@@ -775,6 +775,13 @@ def _dominant_budget_reducer(ctx: ContextSnapshot, floor: str = "1F") -> str:
     if elena and elena.piano:
         return "piano_active"
 
+    # Carlos-in-meeting — 3F only (see noise_budget()'s ×0.05 reducer, D5/C2).
+    # Checked ahead of the sleep tier because ×0.05 is stronger than 3F's own
+    # sleep-tier multiplier (×0.20); naming the wrong cause here would repeat
+    # the 2026-08-31 "invisible gate" class of bug for the meeting path.
+    if floor == "3F" and ctx.home.get("carlos_in_meeting"):
+        return "carlos_in_meeting_active"
+
     # Sleep tier — driven by quiet_hours_2f on every floor (see noise_budget).
     # Reported ahead of the floor's own quiet-hours flag because it is the
     # larger multiplier on 2F (×0.05) and 3F (×0.20).
