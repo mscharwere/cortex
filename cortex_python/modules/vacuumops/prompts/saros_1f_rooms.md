@@ -54,6 +54,13 @@ Robot:
 - R1 comfort gate (noise_acceptable): AMBIGUOUS / PASS-marginal
   - noise_budget_check: impact={{ noise_impact }}, budget={{ noise_budget }} — {{ r1_noise_budget_outcome }}
   - noise_radius_check: {{ r1_noise_radius_outcome }}
+  - opportunity_check (predictive patience, LOG-ONLY — advisory, not a gate):
+    {{ opportunity_read }}
+    This is a FORECAST of how likely this zone is to stay clear for a whole
+    mission, learned from history — NOT a reading of who is in the room now.
+    Actual occupancy has already been checked and passed before you see this.
+    Treat a poor fit as a reason to prefer waiting, never as a reason to
+    dispatch, and ignore it entirely when it reports conf=unavailable.
 
 Note: L1 is only invoked when R1 produces an AMBIGUOUS comfort result — the effectiveness gate has
 already fully PASSED. You are deciding the **comfort/timing question only** — the robot CAN do its

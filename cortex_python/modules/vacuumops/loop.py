@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import time
 import uuid
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
@@ -50,6 +51,7 @@ from cortex_python.modules.vacuumops.jobs import (
 )
 from cortex_python.modules.vacuumops.l1 import L1Decision, resolve_params, resolve_zone_meta, run_l1
 from cortex_python.modules.vacuumops.mop import resolve_batch_mop
+from cortex_python.modules.vacuumops.opportunity import over_threshold_since_key
 from cortex_python.modules.vacuumops.priors import (
     BACKFILL_DONE_KEY,
     PriorLearner,
@@ -58,8 +60,13 @@ from cortex_python.modules.vacuumops.priors import (
 from cortex_python.modules.vacuumops.priors_backfill import backfill_priors
 from cortex_python.modules.vacuumops.r0 import _ZONE_COOLDOWN_KEY as _R0_ZONE_COOLDOWN_KEY
 from cortex_python.modules.vacuumops.r0 import run_r0
+from cortex_python.modules.vacuumops.r1 import (
+    _OPPORTUNITY_DEFER_STREAK_KEY,
+    OpportunityContext,
+    occupancy_gate_bypass,
+    run_r1,
+)
 from cortex_python.modules.vacuumops.r1 import _ROBOT_COOLDOWN_KEY as _R1_ROBOT_COOLDOWN_KEY
-from cortex_python.modules.vacuumops.r1 import occupancy_gate_bypass, run_r1
 from cortex_python.modules.vacuumops.schemas import (
     BatchEntry,
     ContextSnapshot,
@@ -198,6 +205,7 @@ async def evaluate_zone(
     vacuumops_cfg: VacuumOpsConfig,
     patterns: list[dict],
     l1_results: dict[tuple[str, int], L1Decision] | None = None,
+    opp_ctx: OpportunityContext | None = None,
 ) -> ZoneOutcome:
     """Evaluate one (job, zone_id) pair through R0 → R1 → L1.
 
@@ -259,6 +267,7 @@ async def evaluate_zone(
             zone_meta=zone_meta_for_bypass,
             bypass_mode=bypass_mode,
             bypass_reason_str=bypass_reason_str,
+            opp_ctx=opp_ctx,
         )
     except Exception as exc:
         log.exception("r1_error", job_id=job.job_id, zone_id=zone_id)
@@ -308,6 +317,9 @@ async def evaluate_zone(
             patterns_block=patterns_block,
             bypassed_for_zone=bypassed_for_zone,
             reason_for_zone=bypass_reason_str,
+            # Spec §4.4: "the OpportunityRead goes into the L1 prompt verbatim".
+            # None whenever the rule did not form a read for this zone.
+            opportunity_read=opp_ctx.reads.get(zone_id) if opp_ctx else None,
         )
     except Exception as exc:
         log.exception("l1_error", job_id=job.job_id, zone_id=zone_id)
@@ -387,6 +399,123 @@ def dedup_contained(
         return list(candidates), []
 
     return list(candidates), []
+
+
+# ── Predictive patience — per-tick wiring (PR A3) ─────────────────────────────
+#
+# Everything here exists to hand `r1.opportunity_check` the three things a rule
+# in the R1 tier cannot fetch for itself: the learned prior store, the module
+# config, and mission-duration statistics. See `r1.OpportunityContext`.
+
+# Mission stats are cached because they are NOT tick-scoped data. They change
+# only when a mission completes — a handful of times a day — while the loop
+# ticks every 60-300s. Fetching per tick would issue seven HTTP calls a minute
+# to re-read numbers that last moved hours ago. This is the opposite case from
+# `get_zone_data()`, which deliberately declines a TTL because zone SCORES do
+# change every tick; the distinction is the data's own update rate, not a
+# difference of opinion about caching.
+_MISSION_STATS_TTL_S = 900.0
+_mission_stats_cache: dict[tuple[int, int | None], tuple[float, dict[str, Any] | None]] = {}
+
+
+async def _fetch_mission_stats(
+    homeops_adapter: Any,
+    robot_id: int,
+    zone_id: int | None,
+    now_monotonic: float,
+) -> dict[str, Any] | None:
+    """TTL-cached `get_vacuum_mission_stats` read. Never raises.
+
+    A None result is cached like any other, deliberately: a robot with no logged
+    missions (Sam, per design memo §5.3) would otherwise be re-queried on every
+    tick forever to be told the same thing.
+    """
+    key = (robot_id, zone_id)
+    cached = _mission_stats_cache.get(key)
+    if cached is not None and (now_monotonic - cached[0]) < _MISSION_STATS_TTL_S:
+        return cached[1]
+    try:
+        stats = await homeops_adapter.get_mission_stats(robot_id, zone_id)
+    except Exception as exc:  # noqa: BLE001 — adapter already degrades; belt and braces
+        log.warning(
+            "mission_stats_fetch_failed", robot_id=robot_id, zone_id=zone_id, error=str(exc)
+        )
+        stats = None
+    _mission_stats_cache[key] = (now_monotonic, stats)
+    return stats
+
+
+async def build_opportunity_context(
+    ctx: ContextSnapshot,
+    jobs: list[VacuumJob],
+    prior_source: Any,
+    cfg: VacuumOpsConfig,
+    homeops_adapter: Any,
+    now_monotonic: float | None = None,
+) -> OpportunityContext | None:
+    """Assemble the per-tick `OpportunityContext`, or None if nothing needs one.
+
+    Returns None when no active job has `opportunity_enabled` — which is the
+    state for every job but `Saros1FRoomsJob`, and would be the state for ALL of
+    them if Carlos ever switched the feature off. A None context makes
+    `opportunity_check` return PASS with `opportunity_inert`, so switching the
+    feature off costs one flag and zero I/O rather than leaving a rule half-live.
+
+    Stats are fetched per ZONE (single-zone missions) and per ROBOT (batches),
+    because `duration_estimate()` picks between them on `zone_count` — a batch is
+    not the sum of its zones' means, since the zones share one transit and one
+    dock trip. Only zones belonging to opportunity-enabled jobs are fetched.
+    """
+    enabled = [job for job in jobs if job.opportunity_enabled]
+    if not enabled or prior_source is None:
+        return None
+
+    if now_monotonic is None:
+        now_monotonic = time.monotonic()
+
+    zone_stats: dict[int, dict[str, Any]] = {}
+    robot_stats: dict[str, dict[str, Any]] = {}
+
+    for job in enabled:
+        # `robot_id` on the homeOps stats endpoint is the numeric vac_units id,
+        # not the robot's name. ZoneMeta carries it, so it is resolved from the
+        # job's own zones rather than from a second lookup table that could drift.
+        unit_id: int | None = None
+        for zone_id in job.zones:
+            meta = ctx.zone_metadata.get(zone_id)
+            if meta is not None:
+                unit_id = meta.unit_id
+                break
+        if unit_id is None:
+            # No metadata this tick (homeOps degraded). Not fatal: the missing
+            # duration degrades the read to `unavailable`, which is a named
+            # fail-open path, not a silent one.
+            log.warning("opportunity_unit_id_unresolved", job_id=job.job_id)
+            continue
+
+        robot_payload = await _fetch_mission_stats(homeops_adapter, unit_id, None, now_monotonic)
+        if robot_payload is not None:
+            robot_stats[job.robot] = robot_payload
+
+        for zone_id in job.zones:
+            zone_payload = await _fetch_mission_stats(
+                homeops_adapter, unit_id, zone_id, now_monotonic
+            )
+            if zone_payload is not None:
+                zone_stats[zone_id] = zone_payload
+
+    return OpportunityContext(
+        prior_source=prior_source,
+        cfg=cfg,
+        prior_entity_id=cfg.prior_learner_entities[0],
+        # [0] is the 1F rollup — THE BINARY THE OCCUPANCY GATE READS. The other
+        # four tracked entities are diagnostic only (config.py). Indexing rather
+        # than hardcoding the entity id keeps the learner and the reader pointed
+        # at the same sensor by construction.
+        zone_stats=zone_stats,
+        robot_stats=robot_stats,
+        slot_minutes=cfg.prior_learner_slot_minutes,
+    )
 
 
 # ── Batch assembly ─────────────────────────────────────────────────────────────
@@ -681,6 +810,51 @@ async def _set_per_zone_cooldowns(
         log.debug("zone_cooldown_set", zone_id=entry.zone, ttl_s=ttl)
 
 
+async def _clear_opportunity_zone_state(
+    batch: list[BatchEntry], redis_client: aioredis.Redis
+) -> None:
+    """Clear the predictive-patience Redis state for every dispatched zone (§4.4).
+
+    TWO KEYS, CLEARED FOR DIFFERENT REASONS:
+
+    `over_threshold_since` — the starvation clock. A dispatch is exactly the
+    event that ends a zone's wait, so leaving it set would make the zone read as
+    having been over threshold since before a mission it already got, and the
+    6-hour `patience_hard_cap_h` would fire spuriously on the next cycle.
+    Cleared unconditionally, for every dispatched zone, whatever the job.
+
+    `opportunity_defer_streak` — the chained-deferral instrument, and this one is
+    cleared ONLY for jobs that are actually actuating. §4.4 says "cleared on
+    dispatch", which is correct under A4: there, a dispatch can only happen on a
+    tick the rule did not defer, so clearing on dispatch and clearing on a
+    non-`better_window` verdict are the same event.
+
+    ⚠ UNDER A3 THEY ARE NOT THE SAME EVENT, AND CLEARING HERE WOULD DESTROY THE
+    MEASUREMENT. In LOG-ONLY mode every tick passes and dispatches regardless of
+    the verdict, so an unconditional clear-on-dispatch would reset the counter
+    every single tick and pin it at 1 forever — and the A4 go/no-go's "max defer
+    streak >= 6 = do not flip" red light could never illuminate. The counter's
+    entire purpose is to answer "would this zone have got stuck always-one-hour-
+    away?", which is a counterfactual about a dispatch that, in shadow, did not
+    happen. `r1._reset_defer_streak` maintains it from the verdict sequence
+    instead. This branch exists so that flipping to A4 also restores the literal
+    §4.4 semantics without needing a second code change.
+    """
+    for entry in batch:
+        try:
+            job = _job_for_zone(entry.zone)
+        except ValueError:
+            log.warning("opportunity_clear_unknown_zone", zone_id=entry.zone)
+            continue
+        keys = [over_threshold_since_key(entry.zone)]
+        if job.opportunity_actuate:
+            keys.append(_OPPORTUNITY_DEFER_STREAK_KEY.format(zone_id=entry.zone))
+        try:
+            await redis_client.delete(*keys)
+        except Exception as exc:  # noqa: BLE001 — instrumentation must not fail a dispatch
+            log.warning("opportunity_clear_failed", zone_id=entry.zone, error=str(exc))
+
+
 async def _set_robot_cooldown(
     robot: str, cfg: VacuumOpsConfig, redis_client: aioredis.Redis
 ) -> None:
@@ -716,6 +890,7 @@ async def persist_decision(
     dry_run: bool,
     l1_results: dict[tuple[str, int], Any] | None = None,
     mop_decision: MopDecision | None = None,
+    opp_ctx: OpportunityContext | None = None,
 ) -> None:
     """Write the decision to BOTH:
     1. CORTEX-internal decision_log table (SQLAlchemy async session)
@@ -807,6 +982,10 @@ async def persist_decision(
                 l1_passes=str(l1.passes) if (l1 and l1.passes is not None) else None,
                 l1_intensity=str(l1.intensity) if (l1 and l1.intensity is not None) else None,
                 l1_params_reason=l1.params_reason if l1 else None,
+                # Structured predictive-patience read (PR A3). None for every job
+                # but Saros 1F Rooms, and for any tick the rule declined to form
+                # a read — the reason string in `gate_reason` still names why.
+                opportunity=opp_ctx.reads.get(zo.zone) if opp_ctx else None,
             )
         )
 
@@ -1128,6 +1307,25 @@ async def vacuumops_loop(settings: Settings) -> None:
             # so only the mop resolution below is passed this tick-scoped copy.
             tick_vacuumops_cfg = dataclasses.replace(vacuumops_cfg, mop_enabled=live_mop_enabled)
 
+            # Predictive-patience context (PR A3). Built fresh each tick because
+            # its `reads` sink is tick-scoped: it carries this tick's
+            # OpportunityRead per zone from r1 to the L1 prompt and the decision
+            # log, and reusing it across ticks would let a stale read be
+            # attributed to a later decision. Never fatal — on any failure the
+            # context is None and every opportunity_check returns PASS with
+            # `opportunity_inert`, which is the pre-A3 behaviour, named.
+            opp_ctx: OpportunityContext | None = None
+            try:
+                opp_ctx = await build_opportunity_context(
+                    ctx=ctx,
+                    jobs=ACTIVE_JOBS,
+                    prior_source=prior_store,
+                    cfg=vacuumops_cfg,
+                    homeops_adapter=homeops_adapter,
+                )
+            except Exception as exc:
+                log.warning("opportunity_context_build_failed", tick_id=tick_id, error=str(exc))
+
             # Group jobs by robot
             per_robot: dict[str, list[ZoneOutcome]] = defaultdict(list)
             per_robot_l1: dict[str, dict[tuple[str, int], L1Decision]] = defaultdict(dict)
@@ -1166,6 +1364,7 @@ async def vacuumops_loop(settings: Settings) -> None:
                         vacuumops_cfg=vacuumops_cfg,
                         patterns=patterns,
                         l1_results=l1_results,
+                        opp_ctx=opp_ctx,
                     )
                     for zone in job.zones
                 ]
@@ -1245,6 +1444,7 @@ async def vacuumops_loop(settings: Settings) -> None:
                     dry_run=effective_dry_run,
                     l1_results=per_robot_l1.get(robot, {}),
                     mop_decision=mop_decision,
+                    opp_ctx=opp_ctx,
                 )
 
                 if batch:
@@ -1262,6 +1462,9 @@ async def vacuumops_loop(settings: Settings) -> None:
                         )
                         await _set_per_zone_cooldowns(batch, ACTIVE_JOBS, redis_client)
                         await _set_robot_cooldown(robot, vacuumops_cfg, redis_client)
+                        # §4.4: the starvation clock and (under A4) the deferral
+                        # streak end when the zone actually gets its mission.
+                        await _clear_opportunity_zone_state(batch, redis_client)
                         import pytz
 
                         pst = pytz.timezone("America/Los_Angeles")

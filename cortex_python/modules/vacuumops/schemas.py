@@ -289,6 +289,19 @@ class ZoneDecisionDetail:
     l1_intensity: str | None = None  # "auto" | "eco" | "perf"
     l1_params_reason: str | None = None
 
+    # Predictive-patience read for this zone (PR A3, spec §4.4). Populated only
+    # when the job has opportunity_enabled and the rule formed a read; None
+    # otherwise — including for every job but Saros 1F Rooms.
+    #
+    # OPTIONAL BY DESIGN, AND NOTHING STRUCTURAL BREAKS WITHOUT IT: the verdict
+    # already reaches the decision log inside `gate_reason` (as
+    # `opportunity_shadow:<verdict>:...` on the PASS path), and `gate_failed:
+    # "comfort"` already exists for the A4 actuating path. This field exists so
+    # a dashboard can render the fit curve and the streak as STRUCTURE rather
+    # than by parsing a reason string — and so the A4 soak table's four signals
+    # can be computed by query instead of by regex.
+    opportunity: OpportunityRead | None = None
+
 
 @dataclass
 class DecisionEntry:
