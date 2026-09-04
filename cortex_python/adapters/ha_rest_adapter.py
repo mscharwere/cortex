@@ -20,7 +20,8 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §4 (ha_adapter)
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 import structlog
@@ -34,6 +35,16 @@ _warned_missing: set[str] = set()
 
 # HA REST API timeout — generous for entity state polls
 _HA_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
+
+# HA binary_sensor state strings meaning "on". Kept identical to
+# synth/vacuumops_synth.py's _OCCUPIED_STATES so the prior learner's historical
+# view of an entity and the gate's live view of it parse the same way — a drift
+# between the two would make the learner model a signal the gate never sees.
+_TRUTHY_STATES = ("on", "true", "1")
+
+# States carrying no information. A window whose only records are these is
+# indistinguishable from having no records at all, and must not be read as "off".
+_NON_STATES = ("unavailable", "unknown", "none", "")
 
 
 class HARestAdapter:
@@ -131,6 +142,69 @@ class HARestAdapter:
                 log.error("ha_calendar_failed", entity_id=calendar_entity_id, error=str(exc))
                 return []
 
+    async def get_state_history(
+        self,
+        entity_id: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[tuple[datetime, bool]] | None:
+        """Fetch an entity's state-change timeline as (changed_at_utc, truthy) pairs.
+
+        Uses GET /api/history/period/<start ISO>?filter_entity_id=...&end_time=...
+
+        Added for the VacuumOps occupancy prior learner (spec §4.2 / PR A1),
+        which derives each 30-minute slot's occupied FRACTION from state-change
+        timestamps rather than from tick samples -- the loop returns a 300 s
+        interval whenever a robot is cleaning, so a tick-sampled learner would be
+        biased by exactly the windows the feature reasons about.
+
+        Return contract, and the distinction the caller depends on:
+          list  -- the call succeeded. May be EMPTY, which means the recorder
+                   holds no data for this window (purged, or the entity did not
+                   exist yet). Callers must treat empty as "unknown", never as
+                   "the sensor read off the whole time".
+          None  -- the call FAILED (timeout, transport error, non-2xx). The
+                   learner does not advance its watermark on None, so the window
+                   is retried rather than silently skipped.
+
+        HA includes the state in effect AT start_time as the first element when
+        data exists, which is what makes the leading segment of a window
+        attributable. `minimal_response` and `no_attributes` are sent as bare
+        valueless flags because HA tests for parameter PRESENCE, not value.
+        `significant_changes_only` is deliberately NOT sent -- omitting it
+        returns every state change, which is what an exact timeline needs.
+        """
+        start_utc = start.astimezone(UTC) if start.tzinfo else start.replace(tzinfo=UTC)
+        end_utc = end.astimezone(UTC) if end.tzinfo else end.replace(tzinfo=UTC)
+
+        async with self._client() as client:
+            try:
+                r = await client.get(
+                    f"/api/history/period/{start_utc.isoformat()}",
+                    params=[
+                        ("filter_entity_id", entity_id),
+                        ("end_time", end_utc.isoformat()),
+                        ("minimal_response", ""),
+                        ("no_attributes", ""),
+                    ],
+                )
+                if r.status_code == 404:
+                    # The history integration is not loaded, or the entity is
+                    # unknown to the recorder. Either way this is a failed read,
+                    # not an empty one -- do not let it be mistaken for "clear".
+                    log.warning("ha_history_not_found", entity_id=entity_id)
+                    return None
+                r.raise_for_status()
+                payload = r.json()
+            except httpx.TimeoutException:
+                log.warning("ha_history_timeout", entity_id=entity_id)
+                return None
+            except Exception as exc:
+                log.error("ha_history_failed", entity_id=entity_id, error=str(exc))
+                return None
+
+        return _parse_history_payload(payload)
+
     async def publish_loop_status(self, state: str, attributes: dict) -> None:
         """Update the CORTEX VacuumOps loop status HA sensor.
 
@@ -162,6 +236,11 @@ class HARestAdapter:
                     error=str(exc),
                 )
 
+    @staticmethod
+    def parse_history_payload(payload: Any) -> list[tuple[datetime, bool]]:
+        """Exposed for tests — see the module-level _parse_history_payload."""
+        return _parse_history_payload(payload)
+
     async def list_calendar_entities(self) -> list[str]:
         """Return all calendar.* entity IDs currently live in HA.
 
@@ -182,3 +261,47 @@ class HARestAdapter:
             except Exception as exc:
                 log.error("ha_list_calendars_failed", error=str(exc))
                 return []
+
+
+def _parse_history_payload(payload: Any) -> list[tuple[datetime, bool]]:
+    """Flatten HA's /api/history/period response into (changed_at_utc, truthy) pairs.
+
+    HA returns a list of per-entity lists. With `minimal_response` only the FIRST
+    element of each list carries the full state dict; the rest carry just
+    `state` / `last_changed` / `last_updated`. Both shapes are handled here.
+
+    Records whose state is unavailable/unknown/None are DROPPED rather than
+    recorded as False. Dropping them means the surrounding known state extends
+    across the gap, which models a momentarily-flapping integration far better
+    than asserting the room emptied. It also keeps a window whose ONLY records
+    are non-states parsing as empty, which the caller reads as "no data" instead
+    of "clear" — the distinction the whole learner rests on.
+
+    Records without a usable timestamp are dropped for the same reason: a
+    transition that cannot be placed in time cannot be attributed to a slot.
+    """
+    if not isinstance(payload, list):
+        return []
+
+    out: list[tuple[datetime, bool]] = []
+    for entity_series in payload:
+        if not isinstance(entity_series, list):
+            continue
+        for record in entity_series:
+            if not isinstance(record, dict):
+                continue
+            raw_state = str(record.get("state", "")).strip().lower()
+            if raw_state in _NON_STATES:
+                continue
+            raw_ts = record.get("last_changed") or record.get("last_updated")
+            if not isinstance(raw_ts, str):
+                continue
+            try:
+                ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            ts = ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)
+            out.append((ts, raw_state in _TRUTHY_STATES))
+
+    out.sort(key=lambda item: item[0])
+    return out

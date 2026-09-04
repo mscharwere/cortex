@@ -28,6 +28,12 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    # Async SQLite driver — test-only. Lets tests/unit/vacuumops/test_priors.py
+    # exercise the REAL PriorStore SQL (the A1 occupancy prior learner's
+    # read/merge/write path) against a live database instead of only a fake, so a
+    # typo in a hand-written statement is caught by CI rather than in production.
+    # Not a runtime dependency: production is MariaDB via aiomysql.
+    "aiosqlite>=0.20",
     "ruff>=0.7",
     "mypy>=1.13",
     "types-pytz>=2024.1",

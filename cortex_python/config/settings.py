@@ -48,6 +48,14 @@ class Settings(BaseSettings):
 
     # ── VacuumOps module ───────────────────────────────────────────────────────
     cortex_vacuumops_dry_run: bool = False  # Global override removed; per-unit DB flags control
+
+    # Occupancy prior learner kill switch (spec §4.2 / PR A1). Env-sourced rather
+    # than DB-backed, unlike mop_enabled: this switch does not gate a physical
+    # action, so it does not need to be hot-flippable without a redeploy. Defaults
+    # TRUE — the learner only writes rows to a table nothing reads yet, so the
+    # cost of it running is a handful of HA history calls every 30 minutes, while
+    # the cost of it NOT running is wall-clock time that cannot be recovered.
+    cortex_vacuumops_prior_learner_enabled: bool = True
     # NOTE: CORTEX_VACUUMOPS_MOP_ENABLED (the mop-cadence gate master kill switch)
     # intentionally has NO field here as of 2026-08-18. It is now a live,
     # DB-backed setting (HomeOps cortex_vacuumops_settings, GET/PATCH
