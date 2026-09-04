@@ -366,6 +366,65 @@ class BatchEntry:
     # 1-sentence rationale from L1; None when source == "default"
 
 
+@dataclass(frozen=True)
+class OpportunityRead:
+    """The forward read produced by `opportunity()` (PR A2, spec §4.3).
+
+    A structured, loggable answer to "is now a good time, and is a materially
+    better time coming soon?". Consumed by PR A3's `opportunity_check` R1 comfort
+    rule and rendered verbatim into the L1 prompt.
+
+    ⚠ `confidence` IS PART OF THE VALUE, NOT METADATA. Every numeric field on
+    this record is meaningless unless `confidence != "unavailable"`, and callers
+    MUST branch on it before reading anything else. When the read is
+    unavailable the numbers are pinned to their PESSIMISTIC extremes —
+    `p_clear_now = 0.0`, `expected_fit_now = 0.0`, `best_slot_offset = None` —
+    rather than to neutral or optimistic ones. That direction is deliberate: a
+    caller that forgets the confidence check lands on "this window looks bad",
+    which routes to L1 judgment, instead of on "this window is perfect", which
+    would dispatch a vacuum on an absence of evidence.
+    """
+
+    p_clear_now: float
+    # 1 - mean_occupied for the slot containing `now`. 0.0 when unavailable.
+
+    p_clear_curve: tuple[float, ...]
+    # Forward per-slot clear probability, index i = i slots ahead of now,
+    # `lookahead_slots` long. Empty when unavailable or when patience == 0.
+
+    expected_fit_now: float
+    # Duration-weighted P(clear for the WHOLE mission) if dispatched now.
+
+    best_slot_offset: int | None
+    # Slots ahead whose start maximises expected_fit, or None if no forward slot
+    # beats now (or there is no usable forward read at all).
+
+    best_slot_gain: float
+    # expected_fit(best) - expected_fit(now). Never negative.
+
+    duration_estimate_min: float | None
+    # Minutes reserved for the mission. None when no ACTIVE duration was usable.
+
+    duration_basis: str
+    # "p75_active+return_leg" | "p90_active+return_leg" | "mean_fallback" |
+    # "unavailable" — names which input produced duration_estimate_min so the
+    # decision log can tell a measured reserve from a guessed one.
+
+    confidence: str
+    # "good" | "thin" | "unavailable". Only "good" may justify a DEFER (A3).
+
+    degraded_reason: str | None = None
+    # Names the degradation whenever confidence != "good". Never None in that
+    # case: the 2026-08-31 root cause was a gate that no-op'd invisibly, so a
+    # degradation that does not say what degraded is treated as a bug here.
+
+    lookahead_slots: int = 0
+    slot_minutes: int = 30
+    consulted_slots: int = 0
+    # Instrumentation for the A4 soak table: how far the read looked and how many
+    # distinct prior rows had to be sound for it to be trusted.
+
+
 @dataclass
 class MopZoneNeed:
     """Per-zone result of the mop-cadence gate. Internal to mop.py.

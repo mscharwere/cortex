@@ -201,6 +201,68 @@ class VacuumOpsConfig:
     # actuation.
     opportunity_min_slot_samples: int = 3
 
+    # ── Opportunity / patience (opportunity.py, PR A2) ───────────────────────
+    # Spec: cortex_vacuum_patience_and_pause_resume_implementation_spec.md §4.3 + §7
+    #
+    # A2 ships the maths only. Nothing here changes a dispatch: the R1 rule that
+    # consumes these constants is PR A3, and it ships log-only behind a second
+    # flag (opportunity_actuate) that only PR A4 flips. These are the tunables
+    # §11 O-8 flags as TARS's judgment rather than Carlos's measurements —
+    # everything except the D2/D7 pause/park numbers, which live in homeOps.
+
+    # Forward horizon, in hours. Beyond ~3 h a slot prior backed by <=8 weekly
+    # observations is not distinguishable from its own noise, so a longer
+    # lookahead would buy precision the input does not have. Also bounds the
+    # damage a single deferral can do: the rule re-evaluates every tick and can
+    # never defer past this horizon in one decision.
+    opportunity_max_lookahead_h: float = 3.0
+
+    # Native (non-backfilled) learner days required before opportunity() will
+    # report confidence="good". Distinct from opportunity_min_slot_samples,
+    # which is a per-slot bar: this one is the whole-learner age bar, and it is
+    # what stops a table seeded entirely from the 28-day HA-history backfill from
+    # ever satisfying the actuation floor.
+    opportunity_min_learn_days: int = 14
+
+    # DEFER band. Both must hold, AND confidence must be "good":
+    #   best_slot_gain    >= opportunity_strong_gain   (the wait buys a lot)
+    #   expected_fit_now  <= opportunity_weak_fit      (now is genuinely poor)
+    # Two conditions rather than one because a large gain over an already-fine
+    # window is not a reason to make the house wait.
+    opportunity_strong_gain: float = 0.35
+    opportunity_weak_fit: float = 0.30
+
+    # AMBIGUOUS band — escalates to L1 rather than deciding algorithmically.
+    # This is the design's release valve: a marginal fit is a judgment call, and
+    # judgment calls go to the LLM tier, never to a threshold.
+    opportunity_marginal_fit: float = 0.55
+
+    # Added to the ACTIVE-duration percentile to reserve for the return-to-dock
+    # leg, which active duration excludes by construction (§4.1 ⚠).
+    opportunity_return_leg_allowance_min: float = 5.0
+
+    # Which active-duration percentile backs the fit check. "p90" is available
+    # for a more conservative reserve. A mean is NOT an option here — sizing a
+    # window on a mean under-reserves for half of all missions by definition —
+    # and the wall-clock percentiles are not an option either (see
+    # opportunity._ACTIVE_PERCENTILE_FIELDS).
+    opportunity_duration_percentile: str = "p75"
+
+    # ── patience() — two-band step + absolute cap (§4.3) ─────────────────────
+    # PRIMARY starvation guard. Hours a zone may sit above its dispatch
+    # threshold before patience collapses to 0 and the opportunity rule goes
+    # inert. Saros's observed dispatch cadence is ~3.6/day (~6.7 h mean
+    # spacing), so a 6 h cap costs at most one normal cycle.
+    patience_hard_cap_h: float = 6.0
+
+    # SECONDARY guard only, and set high ON PURPOSE. On Saros's 1F zones the
+    # dirtiness score is driven by presence-derived signals (kitchen_presence
+    # +15, post_meal +15, heavy_activity +20, cooking_started +5,
+    # entry_door_open +8), so a HIGH SCORE IS ITSELF EVIDENCE OF IMMINENT
+    # RE-OCCUPANCY. A low value here would aim the mechanism at exactly the
+    # wrong moment. Do not tune this down without reading patience memo §2.D-ii.
+    patience_impatient_score: float = 85.0
+
     @property
     def prior_learner_retention(self) -> int:
         """Max observations kept per slot. One recurrence per week, so weeks == rows."""
