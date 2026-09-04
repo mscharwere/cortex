@@ -333,6 +333,51 @@ def test_dominant_reducer_piano_still_outranks_quiet_hours():
     assert _dominant_budget_reducer(ctx, "1F") == "piano_active"
 
 
+def test_dominant_reducer_names_meeting_for_a_3f_job():
+    """C2 (D5): a 3F deferral during a meeting must name the meeting, not fall
+    through to quiet_hours_2f_active or a bare noise_budget_exceeded — the same
+    'invisible gate' failure class the 2026-08-31 incident was about."""
+    from cortex_python.modules.vacuumops.r1 import _dominant_budget_reducer
+
+    ctx = make_snapshot()
+    ctx.home["carlos_in_meeting"] = True
+    assert _dominant_budget_reducer(ctx, "3F") == "carlos_in_meeting_active"
+
+
+def test_dominant_reducer_meeting_outranks_quiet_hours_on_3f():
+    """×0.05 (meeting) is stronger than 3F's own sleep tier (×0.20) — meeting
+    must win the attribution when both are active."""
+    from cortex_python.modules.vacuumops.r1 import _dominant_budget_reducer
+
+    ctx = make_snapshot(quiet_hours_1f=True, quiet_hours_2f=True)
+    ctx.home["carlos_in_meeting"] = True
+    assert _dominant_budget_reducer(ctx, "3F") == "carlos_in_meeting_active"
+
+
+def test_dominant_reducer_meeting_is_3f_scoped_only():
+    """The meeting flag must not be named as the cause on 1F/2F — it never
+    reduces their budgets, so attributing a 1F/2F deferral to it would be a
+    wrong-cause bug of exactly the kind this function exists to prevent."""
+    from cortex_python.modules.vacuumops.r1 import _dominant_budget_reducer
+
+    ctx = make_snapshot(quiet_hours_1f=True, quiet_hours_2f=True)
+    ctx.home["carlos_in_meeting"] = True
+    assert _dominant_budget_reducer(ctx, "1F") != "carlos_in_meeting_active"
+    assert _dominant_budget_reducer(ctx, "2F") != "carlos_in_meeting_active"
+
+
+def test_dominant_reducer_piano_still_outranks_meeting():
+    """Piano is checked first — the single most disruptive signal in the
+    household — so it must still win over the meeting flag on 3F."""
+    from cortex_python.modules.vacuumops.r1 import _dominant_budget_reducer
+    from cortex_python.modules.vacuumops.schemas import PersonActivity
+
+    ctx = make_snapshot()
+    ctx.people["elena"] = PersonActivity(activity="home_idle", confidence=0.9, piano=True)
+    ctx.home["carlos_in_meeting"] = True
+    assert _dominant_budget_reducer(ctx, "3F") == "piano_active"
+
+
 # ── noise_radius_check ────────────────────────────────────────────────────────
 
 

@@ -96,6 +96,17 @@ def noise_budget(ctx: ContextSnapshot, floor: str) -> float:
     if elena and elena.piano:
         budget *= 0.05  # piano in progress: practically off-limits
 
+    # Carlos in a meeting — 3F ONLY (Ethan operates right outside the home
+    # office). Sourced from ctx.home, a passthrough of sensor.home_context's
+    # attributes (binary_sensor.carlos_in_meeting is expected to be surfaced
+    # there) so this reducer needs no schema or synth change to go live, and is
+    # a correct no-op today with the key absent. Mirrors the piano multiplier
+    # (dispatch-suppressing only — see noise_budget_check) but MUST stay
+    # floor-scoped: leaking onto 1F/2F would be the exact cortex#46 floor-leak
+    # regression class. D5, cortex_vacuum_patience_and_pause_resume_implementation_spec.md §6 (C2).
+    if floor == "3F" and ctx.home.get("carlos_in_meeting"):
+        budget *= 0.05  # meeting in progress: practically off-limits on 3F
+
     # Sleep state (2F bedrooms) — floor-aware suppression
     sleep_active = ctx.quiet_hours_2f or any(
         p.sleep_confidence is not None and p.sleep_confidence > 0.7
