@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -208,7 +208,16 @@ def make_opp_ctx(
     age_days: float = 30.0,
     empty_after: int | None = None,
     cfg: VacuumOpsConfig | None = None,
+    actuate: bool = False,
+    actuate_degraded: bool = False,
 ) -> OpportunityContext:
+    """Build an OpportunityContext for the rule under test.
+
+    `actuate` / `actuate_degraded` go onto the CONFIG, not onto the job — that
+    is where the live HomeOps switch lands (config.VacuumOpsConfig), and
+    building the fixture the way the loop builds it keeps the tests honest about
+    the real delivery path. Passing an explicit `cfg` overrides both.
+    """
     source = FakePriorSource(
         means=means if means is not None else [0.02] * 12,
         native_count=native_count,
@@ -217,7 +226,11 @@ def make_opp_ctx(
     )
     return OpportunityContext(
         prior_source=source,
-        cfg=cfg or VacuumOpsConfig(),
+        cfg=cfg
+        or VacuumOpsConfig(
+            opportunity_actuate=actuate,
+            opportunity_actuate_degraded=actuate_degraded,
+        ),
         prior_entity_id=ENTITY,
         zone_stats={ZONE: stats} if stats is not None else {},
         robot_stats={},
@@ -304,12 +317,12 @@ class TestInvariantCannotForceDispatch:
 
     @pytest.mark.asyncio
     async def test_actuating_verdicts_only_ever_withhold(self) -> None:
-        """Even with A4's flag on, no verdict produces a dispatch-forcing result."""
-        job = Saros1FRoomsJob(opportunity_actuate=True)
+        """Even with actuation live, no verdict produces a dispatch-forcing result."""
+        job = Saros1FRoomsJob()
         outcomes = set()
         for curve in (CURVE_BETTER_WINDOW, CURVE_FIT_OK, CURVE_FIT_MARGINAL):
             result, gate, _ = await opportunity_check(
-                job, ZONE, make_ctx(), FakeRedis(), make_opp_ctx(curve)
+                job, ZONE, make_ctx(), FakeRedis(), make_opp_ctx(curve, actuate=True)
             )
             outcomes.add((result, gate))
         assert outcomes == {
@@ -442,13 +455,13 @@ class TestInvariantDegradationNamesItself:
         to weigh it, which grants a thin prior more authority than its evidence
         supports. The rule declines outright instead.
         """
-        job = Saros1FRoomsJob(opportunity_actuate=True)
+        job = Saros1FRoomsJob()
         result, gate, reason = await opportunity_check(
             job,
             ZONE,
             make_ctx(),
             FakeRedis(),
-            make_opp_ctx(CURVE_FIT_MARGINAL, native_count=2),
+            make_opp_ctx(CURVE_FIT_MARGINAL, native_count=2, actuate=True),
         )
         assert (result, gate) == ("PASS", "none")
         assert reason.startswith("opportunity_thin:")
@@ -753,8 +766,9 @@ class TestDeferStreak:
         """
         redis = FakeRedis()
         job = Saros1FRoomsJob()
-        assert job.opportunity_actuate is False
+        assert make_opp_ctx(CURVE_BETTER_WINDOW).cfg.opportunity_actuate is False
         for _ in range(4):
+            # A fresh context per tick, as the loop builds one per tick.
             await opportunity_check(job, ZONE, make_ctx(), redis, make_opp_ctx(CURVE_BETTER_WINDOW))
         assert redis.data[self.KEY] == "4"
 
@@ -796,7 +810,9 @@ class TestDeferStreak:
         from cortex_python.modules.vacuumops.schemas import BatchEntry
 
         redis = FakeRedis({over_threshold_since_key(ZONE): NOW.isoformat(), self.KEY: "3"})
-        await _clear_opportunity_zone_state([BatchEntry(zone=ZONE, bundled=False, score=70.0)], redis)
+        await _clear_opportunity_zone_state(
+            [BatchEntry(zone=ZONE, bundled=False, score=70.0)], redis, actuating=False
+        )
         assert over_threshold_since_key(ZONE) not in redis.data
         # Shadow mode: the streak SURVIVES the dispatch, because in shadow the
         # dispatch happened despite the verdict. Clearing it here would pin the
@@ -806,20 +822,357 @@ class TestDeferStreak:
 
     @pytest.mark.asyncio
     async def test_dispatch_clears_the_streak_once_actuating(self) -> None:
-        """Under A4 the literal §4.4 semantics ("cleared on dispatch") apply."""
-        import cortex_python.modules.vacuumops.loop as loop_mod
+        """Once actuating, the literal §4.4 semantics ("cleared on dispatch") apply.
+
+        `actuating` is now passed down from the tick's live HomeOps read rather
+        than being read off a job field, so this no longer has to monkeypatch
+        ACTIVE_JOBS to express "the switch is on".
+        """
+        from cortex_python.modules.vacuumops.loop import _clear_opportunity_zone_state
         from cortex_python.modules.vacuumops.schemas import BatchEntry
 
         redis = FakeRedis({over_threshold_since_key(ZONE): NOW.isoformat(), self.KEY: "3"})
-        original = loop_mod.ACTIVE_JOBS
-        loop_mod.ACTIVE_JOBS = [Saros1FRoomsJob(opportunity_actuate=True)]
-        try:
-            await loop_mod._clear_opportunity_zone_state(
-                [BatchEntry(zone=ZONE, bundled=False, score=70.0)], redis
-            )
-        finally:
-            loop_mod.ACTIVE_JOBS = original
+        await _clear_opportunity_zone_state(
+            [BatchEntry(zone=ZONE, bundled=False, score=70.0)], redis, actuating=True
+        )
         assert self.KEY not in redis.data
+        assert over_threshold_since_key(ZONE) not in redis.data
+
+
+# ── The live, DB-backed actuation switch ─────────────────────────────────────
+
+
+class TestLiveActuateWiring:
+    """`opportunity_actuate` as a live HomeOps setting rather than a code constant.
+
+    It used to be a static `VacuumJob.opportunity_actuate` field whose flip was
+    planned PR A4's entire content. It now arrives per tick from HomeOps
+    `cortex_vacuumops_settings` and is threaded onto a tick-scoped
+    VacuumOpsConfig — the same mechanism `mop_enabled` already uses, pinned for
+    the mop side by test_mop.py::TestLivePerTickWiring.
+
+    What must hold: the rule reads the CONFIG (not the job); the value reaches
+    it through the loop's real threading path; a flip takes effect on the very
+    next tick with nothing sticky in between; and every off state is
+    fail-closed toward PASS, never toward a withheld dispatch.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_rule_reads_the_config_not_the_job(self) -> None:
+        """Same job object, opposite outcomes — so the config is what decides."""
+        job = Saros1FRoomsJob()
+        shadow, _, shadow_reason = await opportunity_check(
+            job, ZONE, make_ctx(), FakeRedis(), make_opp_ctx(CURVE_BETTER_WINDOW)
+        )
+        live, live_gate, live_reason = await opportunity_check(
+            job, ZONE, make_ctx(), FakeRedis(), make_opp_ctx(CURVE_BETTER_WINDOW, actuate=True)
+        )
+        assert (shadow, live, live_gate) == ("PASS", "FAIL", "comfort")
+        assert shadow_reason.startswith("opportunity_shadow:better_window")
+        assert live_reason.startswith("better_window_in_")
+
+    @pytest.mark.asyncio
+    async def test_a_flip_is_not_sticky_between_ticks(self) -> None:
+        """The behavioural core of "quickly disable": a fresh config per tick,
+        so there is no cache to invalidate and nothing that can serve a stale
+        value. Mirrors test_mop.py::test_toggling_between_ticks_is_not_sticky."""
+        job = Saros1FRoomsJob()
+        results = []
+        for actuate in (True, False, True):
+            result, _, _ = await opportunity_check(
+                job,
+                ZONE,
+                make_ctx(),
+                FakeRedis(),
+                make_opp_ctx(CURVE_BETTER_WINDOW, actuate=actuate),
+            )
+            results.append(result)
+        assert results == ["FAIL", "PASS", "FAIL"]
+
+    @pytest.mark.asyncio
+    async def test_the_per_job_opt_in_still_outranks_the_live_switch(self) -> None:
+        """⛔ A DB row must never be able to switch the feature on for a job that
+        opted out in code. `opportunity_enabled` is checked first and returns
+        before any config value is consulted, so the four non-Saros jobs are
+        unreachable from HomeOps entirely."""
+        for job in (Saros1FLitterBoxJob(), Ethan3FLitterBoxJob(), Ethan3FRoomsJob(), Sam2FJob()):
+            result, gate, reason = await opportunity_check(
+                job, ZONE, make_ctx(), FakeRedis(), make_opp_ctx(CURVE_BETTER_WINDOW, actuate=True)
+            )
+            assert (result, gate) == ("PASS", "none"), job.job_id
+            assert reason == "opportunity_disabled", job.job_id
+
+    @pytest.mark.asyncio
+    async def test_the_loop_threads_the_live_value_onto_a_tick_scoped_config(self) -> None:
+        """The real delivery path, not a hand-built config.
+
+        `build_opportunity_context` must receive the TICK-scoped config. Handing
+        it the process-scoped one would pin the rule to the dataclass default,
+        and no HomeOps flip would ever reach the rule — a failure invisible to
+        every test that constructs an OpportunityContext directly. This is the
+        `mop_enabled`-shipped-unwired failure class (config.py's ARIIA finding 1)
+        in its new location.
+        """
+        import dataclasses
+
+        from cortex_python.adapters.homeops_adapter import VacuumOpsLiveSettings
+        from cortex_python.modules.vacuumops.loop import (
+            build_opportunity_context,
+            build_tick_config,
+        )
+
+        live = VacuumOpsLiveSettings(mop_enabled=False, opportunity_actuate=True, read_ok=True)
+        base = VacuumOpsConfig()
+        tick_cfg = build_tick_config(base, live)
+        assert base.opportunity_actuate is False, "the process-scoped copy stays off"
+
+        homeops = AsyncMock()
+        homeops.get_mission_stats = AsyncMock(return_value=GOOD_STATS)
+        ctx = make_ctx()
+        out = await build_opportunity_context(
+            ctx=ctx,
+            jobs=[Saros1FRoomsJob()],
+            prior_source=FakePriorSource(means=[0.02] * 12),
+            cfg=tick_cfg,
+            homeops_adapter=homeops,
+        )
+        assert out is not None
+        assert out.cfg.opportunity_actuate is True
+        assert out.cfg.opportunity_actuate_degraded is False
+
+        # And the rule actually acts on what arrived that way.
+        result, gate, _ = await opportunity_check(
+            Saros1FRoomsJob(),
+            ZONE,
+            make_ctx(),
+            FakeRedis(),
+            dataclasses.replace(make_opp_ctx(CURVE_BETTER_WINDOW), cfg=tick_cfg),
+        )
+        assert (result, gate) == ("FAIL", "comfort")
+
+
+class TestBuildTickConfig:
+    """`loop.build_tick_config` — the HomeOps-read → config mapping.
+
+    This is the join a "shipped unwired" bug hides in: the DB column exists, the
+    adapter reads it, the rule checks the config field, and nothing connects the
+    two. That is ARIIA finding 1 on the original mop_enabled env var, verbatim,
+    and it is invisible to any test that builds a VacuumOpsConfig by hand.
+    """
+
+    def test_both_flags_are_mapped(self) -> None:
+        from cortex_python.adapters.homeops_adapter import VacuumOpsLiveSettings
+        from cortex_python.modules.vacuumops.loop import build_tick_config
+
+        cfg = build_tick_config(
+            VacuumOpsConfig(),
+            VacuumOpsLiveSettings(mop_enabled=True, opportunity_actuate=True, read_ok=True),
+        )
+        assert cfg.mop_enabled is True
+        assert cfg.opportunity_actuate is True
+        assert cfg.opportunity_actuate_degraded is False
+
+    def test_the_flags_are_mapped_independently(self) -> None:
+        """Guards against a copy-paste that wires one field from the other."""
+        from cortex_python.adapters.homeops_adapter import VacuumOpsLiveSettings
+        from cortex_python.modules.vacuumops.loop import build_tick_config
+
+        cfg = build_tick_config(
+            VacuumOpsConfig(),
+            VacuumOpsLiveSettings(mop_enabled=True, opportunity_actuate=False, read_ok=True),
+        )
+        assert cfg.mop_enabled is True
+        assert cfg.opportunity_actuate is False
+
+    def test_a_failed_read_is_marked_degraded(self) -> None:
+        from cortex_python.adapters.homeops_adapter import VacuumOpsLiveSettings
+        from cortex_python.modules.vacuumops.loop import build_tick_config
+
+        cfg = build_tick_config(VacuumOpsConfig(), VacuumOpsLiveSettings(read_ok=False))
+        assert cfg.opportunity_actuate is False
+        assert cfg.opportunity_actuate_degraded is True
+
+    def test_the_base_config_is_never_mutated(self) -> None:
+        """`base` is shared by every tick for the life of the process."""
+        from cortex_python.adapters.homeops_adapter import VacuumOpsLiveSettings
+        from cortex_python.modules.vacuumops.loop import build_tick_config
+
+        base = VacuumOpsConfig()
+        tick = build_tick_config(
+            base, VacuumOpsLiveSettings(mop_enabled=True, opportunity_actuate=True, read_ok=True)
+        )
+        assert base.opportunity_actuate is False
+        assert base.mop_enabled is False
+        assert tick is not base
+
+    def test_static_tunables_survive_the_fold(self) -> None:
+        """Only the live flags change; everything else must come through intact."""
+        from cortex_python.adapters.homeops_adapter import VacuumOpsLiveSettings
+        from cortex_python.modules.vacuumops.loop import build_tick_config
+
+        base = VacuumOpsConfig(opportunity_strong_gain=0.42, patience_hard_cap_h=9.0)
+        tick = build_tick_config(base, VacuumOpsLiveSettings(read_ok=True))
+        assert tick.opportunity_strong_gain == 0.42
+        assert tick.patience_hard_cap_h == 9.0
+
+
+class TestTickScopedConfigIsTheOnlyOne:
+    """Inside a tick, every config argument must be the TICK-scoped copy.
+
+    ⚠ WHY A SOURCE-LEVEL TEST, WHICH IS OTHERWISE NOT THIS SUITE'S STYLE.
+
+    This pins the one failure the rest of this file structurally cannot see.
+    Every other test builds an OpportunityContext (or a VacuumOpsConfig) itself,
+    so all of them keep passing if `vacuumops_loop` hands
+    `build_opportunity_context` the PROCESS-scoped `vacuumops_cfg` instead of
+    `tick_vacuumops_cfg`. The two objects are the same type and differ only in
+    the live flags, so nothing raises, nothing logs, and the whole feature is
+    silently inert: HomeOps has the column, the adapter reads it, the rule
+    checks the field, the operator flips the row, and nothing happens. That is
+    ARIIA finding 1 ("kill switch shipped unwired") exactly, one hop further
+    along than where it was originally found.
+
+    Verified as a real gap, not a hypothetical: mutating that single call site
+    to `cfg=vacuumops_cfg` left the entire suite green before this test existed.
+
+    The honest alternative is driving a full tick of `vacuumops_loop`, which
+    means standing up Redis, a LiteLLM client, a SQLAlchemy engine and breaking
+    out of a `while True`. That buys fidelity this invariant does not need: the
+    property is "no call in this function passes the wrong identifier", which is
+    exactly a statement about the source.
+    """
+
+    @staticmethod
+    def _loop_fn_ast():
+        import ast
+        import inspect
+
+        from cortex_python.modules.vacuumops import loop as loop_mod
+
+        tree = ast.parse(inspect.getsource(loop_mod))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "vacuumops_loop":
+                return node
+        raise AssertionError("vacuumops_loop not found — did it get renamed?")
+
+    def test_no_call_passes_the_process_scoped_config(self) -> None:
+        import ast
+
+        offenders = []
+        for node in ast.walk(self._loop_fn_ast()):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if kw.arg in {"cfg", "vacuumops_cfg"} and isinstance(kw.value, ast.Name):
+                    # build_tick_config(vacuumops_cfg, ...) is the ONE legitimate
+                    # consumer — it is what produces the tick-scoped copy — and it
+                    # passes positionally, so it is not a keyword and never lands
+                    # here.
+                    if kw.value.id != "tick_vacuumops_cfg":
+                        offenders.append(f"line {kw.value.lineno}: {kw.arg}={kw.value.id}")
+        assert not offenders, (
+            "these calls inside vacuumops_loop pass a non-tick-scoped config, so "
+            "the live HomeOps kill switches will not reach them: " + "; ".join(offenders)
+        )
+
+    def test_the_opportunity_context_specifically_gets_the_tick_config(self) -> None:
+        """Named separately from the sweep above so a failure says WHICH feature
+        just went inert, rather than only that some call is wrong."""
+        import ast
+
+        seen = []
+        for node in ast.walk(self._loop_fn_ast()):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "build_opportunity_context"
+            ):
+                seen += [
+                    kw.value.id
+                    for kw in node.keywords
+                    if kw.arg == "cfg" and isinstance(kw.value, ast.Name)
+                ]
+        assert seen == ["tick_vacuumops_cfg"], (
+            f"build_opportunity_context must receive the tick-scoped config; got {seen}"
+        )
+
+
+class TestActuateFailsClosed:
+    """Every way the switch can be unreadable must degrade toward PASS.
+
+    Note WHICH way "closed" points for this flag, because it is the opposite of
+    the mop gate's and getting it backwards would be the serious bug: False here
+    does not stop a robot, it stops the RULE. An unreachable HomeOps therefore
+    degrades to pre-A4 behaviour (clean as before), never to a robot quietly
+    declining to clean because a settings read timed out.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "curve", [CURVE_BETTER_WINDOW, CURVE_FIT_OK, CURVE_FIT_MARGINAL, [0.5] * 12]
+    )
+    async def test_a_degraded_read_can_never_withhold_a_dispatch(self, curve) -> None:
+        result, gate, _ = await opportunity_check(
+            Saros1FRoomsJob(),
+            ZONE,
+            make_ctx(),
+            FakeRedis(),
+            make_opp_ctx(curve, actuate=False, actuate_degraded=True),
+        )
+        assert (result, gate) == ("PASS", "none")
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_read_names_itself_in_the_decision_log(self) -> None:
+        """Invariant 3. A settings outage and a deliberate "not yet" both produce
+        `actuate=False`, so if they shared a reason string the outage would be
+        invisible in the one place the §4.5 soak is read from — which is the
+        2026-08-31 invisible-no-op root cause wearing a new hat."""
+        _, _, reason = await opportunity_check(
+            Saros1FRoomsJob(),
+            ZONE,
+            make_ctx(),
+            FakeRedis(),
+            make_opp_ctx(CURVE_BETTER_WINDOW, actuate=False, actuate_degraded=True),
+        )
+        assert reason.startswith("opportunity_shadow_degraded:settings_read_failed:")
+        assert "better_window" in reason, "the real verdict is still logged"
+
+    @pytest.mark.asyncio
+    async def test_a_deliberate_off_is_not_reported_as_degraded(self) -> None:
+        _, _, reason = await opportunity_check(
+            Saros1FRoomsJob(),
+            ZONE,
+            make_ctx(),
+            FakeRedis(),
+            make_opp_ctx(CURVE_BETTER_WINDOW, actuate=False, actuate_degraded=False),
+        )
+        assert reason.startswith("opportunity_shadow:")
+        assert "degraded" not in reason
+
+    @pytest.mark.asyncio
+    async def test_degradation_is_declared_in_the_fail_open_matrix(self) -> None:
+        _, _, reason = await opportunity_check(
+            Saros1FRoomsJob(),
+            ZONE,
+            make_ctx(),
+            FakeRedis(),
+            make_opp_ctx(CURVE_BETTER_WINDOW, actuate_degraded=True),
+        )
+        assert reason.split(":", 1)[0] in _OPPORTUNITY_FAIL_OPEN
+
+    @pytest.mark.asyncio
+    async def test_the_degraded_bit_cannot_switch_actuation_on(self) -> None:
+        """Belt-and-braces on the field pair: `actuate_degraded` is provenance,
+        never permission. A degraded read with the flag somehow true must still
+        be driven by the flag, not by the bit."""
+        result, _, _ = await opportunity_check(
+            Saros1FRoomsJob(),
+            ZONE,
+            make_ctx(),
+            FakeRedis(),
+            make_opp_ctx(CURVE_BETTER_WINDOW, actuate=False, actuate_degraded=True),
+        )
+        assert result == "PASS"
 
 
 # ── Shadow mode — the safety promise of this entire PR ───────────────────────
@@ -831,12 +1184,11 @@ class TestShadowMode:
         "curve", [CURVE_BETTER_WINDOW, CURVE_FIT_OK, CURVE_FIT_MARGINAL, [0.5] * 12]
     )
     async def test_shadow_mode_can_never_change_a_verdict(self, curve: list[float]) -> None:
-        """Across the full verdict cross-product, A3 always returns PASS."""
+        """Across the full verdict cross-product, shadow mode always returns PASS."""
         job = Saros1FRoomsJob()
-        assert job.opportunity_actuate is False
-        result, gate, _ = await opportunity_check(
-            job, ZONE, make_ctx(), FakeRedis(), make_opp_ctx(curve)
-        )
+        opp = make_opp_ctx(curve)
+        assert opp.cfg.opportunity_actuate is False
+        result, gate, _ = await opportunity_check(job, ZONE, make_ctx(), FakeRedis(), opp)
         assert (result, gate) == ("PASS", "none")
 
     @pytest.mark.asyncio
@@ -914,8 +1266,15 @@ class TestPerJobFlags:
         ):
             assert job.opportunity_enabled is False, job.job_id
 
-    def test_no_job_actuates(self) -> None:
-        """⛔ A4's content. If this fails, a PR is changing live dispatch."""
+    def test_actuation_is_not_a_job_field_any_more(self) -> None:
+        """The static field is GONE, not merely False.
+
+        Leaving a dead `opportunity_actuate` on the job descriptors would be the
+        confusing-state failure config.py's mop_enabled docstring documents: a
+        reader flips the field they can see, nothing happens, because the value
+        that decides is a DB row. Asserting absence is the only way to keep a
+        future PR from "helpfully" restoring it as a local override.
+        """
         for job in (
             Saros1FRoomsJob(),
             Saros1FLitterBoxJob(),
@@ -923,14 +1282,28 @@ class TestPerJobFlags:
             Ethan3FRoomsJob(),
             Sam2FJob(),
         ):
-            assert job.opportunity_actuate is False, job.job_id
+            assert not hasattr(job, "opportunity_actuate"), job.job_id
+
+    def test_actuation_ships_off_and_unwired(self) -> None:
+        """⛔ Still A4's content, just relocated. The switch ships false, and
+        `build_vacuumops_config` must not source it from env either — its only
+        legitimate source is the per-tick HomeOps read."""
+        from cortex_python.config.settings import Settings
+        from cortex_python.modules.vacuumops.config import build_vacuumops_config
+
+        assert VacuumOpsConfig().opportunity_actuate is False
+        assert VacuumOpsConfig().opportunity_actuate_degraded is False
+
+        settings = MagicMock(spec=Settings)
+        settings.cortex_vacuumops_dry_run = False
+        settings.cortex_vacuumops_prior_learner_enabled = True
+        assert build_vacuumops_config(settings).opportunity_actuate is False
 
     def test_the_active_roster_matches(self) -> None:
         from cortex_python.modules.vacuumops.loop import ACTIVE_JOBS
 
         enabled = [j.job_id for j in ACTIVE_JOBS if j.opportunity_enabled]
         assert enabled == ["saros_1f_rooms"]
-        assert not any(j.opportunity_actuate for j in ACTIVE_JOBS)
 
 
 # ── Bundling (§5.5) — the guard is structural ────────────────────────────────

@@ -571,13 +571,22 @@ def noise_radius_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tu
 #
 # WHAT THIS IS NOT
 # ----------------
-# ⚠ THIS RULE CANNOT CHANGE A DISPATCH OUTCOME IN THIS PR. Every job ships with
-# `opportunity_actuate = False`, and the shadow branch below returns PASS before
-# any verdict is allowed to become a FAIL or an AMBIGUOUS. The rule computes a
-# real verdict, writes a real deferral-streak counter and logs a real reason
-# string — and then passes anyway. PR A4 is the one-line flip that lets the
-# verdict act, and it is gated on a 14-day soak (§4.5's four-signal table) plus
-# Carlos's explicit go-ahead. Do not flip `opportunity_actuate` in this file.
+# ⚠ THIS RULE CANNOT CHANGE A DISPATCH OUTCOME UNLESS ACTUATION IS LIVE. The
+# shadow branch below returns PASS before any verdict is allowed to become a
+# FAIL or an AMBIGUOUS. The rule computes a real verdict, writes a real
+# deferral-streak counter and logs a real reason string — and then passes
+# anyway. What lifts that is `cfg.opportunity_actuate`, and as of this PR it is
+# NOT a source-tree constant: it is a live, DB-backed HomeOps setting
+# (`cortex_vacuumops_settings`), re-read every tick and threaded in through
+# `dataclasses.replace()` by `loop.vacuumops_loop()`. It ships FALSE and
+# fail-closed — an unreachable HomeOps is shadow mode, never a withheld
+# dispatch.
+#
+# Moving the switch out of the code did NOT move the decision. Flipping the row
+# is still gated on a >=14-day soak (§4.5's four-signal table) plus Carlos's
+# explicit go-ahead. What changed is that turning it back OFF is now a DB write
+# rather than a redeploy, which is the property a kill switch is for. Do not
+# hardcode this flag anywhere in this file.
 #
 # It is also NOT an occupancy gate and must never be mistaken for one. It reasons
 # about PREDICTED occupancy from a learned prior. Actual, measured occupancy is
@@ -669,6 +678,11 @@ _OPPORTUNITY_FAIL_OPEN: tuple[str, ...] = (
     "opportunity_thin",  # a read too thinly evidenced to act on (or escalate on)
     "opportunity_error",  # unexpected exception; rule is inert, tick survives
     "opportunity_shadow",  # LOG-ONLY: a real verdict, deliberately not acted on
+    "opportunity_shadow_degraded",  # LOG-ONLY because the settings read FAILED,
+    # not because anyone chose it. Distinct from `opportunity_shadow` on purpose:
+    # the two are indistinguishable from the flag alone (the read fails closed),
+    # and a reviewer counting shadow rows during the §4.5 soak must be able to
+    # tell "Carlos has not flipped it yet" from "HomeOps was down for six hours".
 )
 
 
@@ -892,16 +906,18 @@ async def _reset_defer_streak(redis_client: aioredis.Redis, zone_id: int) -> Non
     """Clear the streak because THIS tick's verdict was not `better_window`.
 
     ⚠ THIS IS WHY THE COUNTER IS USABLE DURING THE SHADOW SOAK, AND IT IS A
-    DELIBERATE READING OF §4.4's "cleared on dispatch". Under A4 the two clear
-    conditions coincide: a non-`better_window` verdict is exactly the tick on
-    which the zone stops being deferred and dispatches. Under A3 they do NOT
+    DELIBERATE READING OF §4.4's "cleared on dispatch". While actuating, the two
+    clear conditions coincide: a non-`better_window` verdict is exactly the tick
+    on which the zone stops being deferred and dispatches. IN SHADOW THEY DO NOT
     coincide — every tick passes and dispatches, so clearing on dispatch alone
     would pin the streak at 1 forever and the A4 soak table's "max streak >= 6"
     red light could never illuminate. Clearing on the VERDICT instead measures
     the counterfactual the soak is actually asking about: how many consecutive
     ticks WOULD this zone have been deferred? `loop` still clears on dispatch as
-    well, but only for jobs that are actuating — see
+    well, but only on ticks where actuation is live — see
     `loop._clear_opportunity_zone_state` for the other half of this reasoning.
+    Because the switch is now a live DB read, which of the two regimes applies
+    can change between one tick and the next without a deploy.
     """
     key = _OPPORTUNITY_DEFER_STREAK_KEY.format(zone_id=zone_id)
     try:
@@ -919,13 +935,15 @@ async def opportunity_check(
 ) -> tuple[str, str, str]:
     """Comfort rule: is a materially better cleaning window arriving soon?
 
-    LOG-ONLY IN THIS PR. See the block comment above for the three structural
-    invariants, the fail-open matrix and why bundling needs no runtime guard.
+    See the block comment above for the three structural invariants, the
+    fail-open matrix and why bundling needs no runtime guard.
 
-    Returns the standard `(result, gate_failed, reason)` triple. In A3 the result
-    is ALWAYS "PASS" — asserted by `test_shadow_mode_can_never_change_a_verdict`
-    across the full verdict cross-product — because `job.opportunity_actuate` is
-    False on every job. The reason string is where all the information goes.
+    Returns the standard `(result, gate_failed, reason)` triple. While
+    `opp_ctx.cfg.opportunity_actuate` is False the result is ALWAYS "PASS" —
+    asserted by `test_shadow_mode_can_never_change_a_verdict` across the full
+    verdict cross-product — and the reason string is where all the information
+    goes. That flag is live and DB-backed (HomeOps), so shadow-vs-actuating is
+    a property of THIS TICK, not of the deployed code.
     """
     if not job.opportunity_enabled:
         return "PASS", "none", "opportunity_disabled"
@@ -1069,8 +1087,31 @@ async def _opportunity_verdict(
 
     detail = f"{format_opportunity(opp)} streak={streak}"
 
-    # ── 7. LOG-ONLY GATE. Nothing below this line runs in PR A3. ──
-    if not job.opportunity_actuate:
+    # ── 7. ACTUATION GATE. Nothing below this line runs while it is off. ──
+    #
+    # Read off the VacuumOpsConfig this rule was handed, with no knowledge of
+    # where the value came from — deliberately the same ignorance `mop.py` has
+    # about `cfg.mop_enabled`. Today it arrives from HomeOps
+    # `cortex_vacuumops_settings`, re-read every tick and threaded in via
+    # `dataclasses.replace()` in `loop.vacuumops_loop()`; if that source ever
+    # changes again, nothing in this file should need to.
+    #
+    # TWO DISTINCT OFF STATES, AND THEY MUST NOT SHARE A REASON STRING. The
+    # read fails closed, so `opportunity_actuate=False` means EITHER "Carlos
+    # has not turned it on" or "we could not reach HomeOps". Invariant 3 says
+    # every degraded path names its degradation; collapsing an outage into the
+    # ordinary shadow reason would hide it in exactly the place a reviewer
+    # looks — the decision log — which is the 2026-08-31 invisible-no-op bug
+    # with a new coat of paint. `cfg.opportunity_actuate_degraded` separates
+    # them. Both still PASS: an unreachable settings endpoint degrades to
+    # pre-A4 behaviour, never to a withheld dispatch.
+    if not cfg.opportunity_actuate:
+        if cfg.opportunity_actuate_degraded:
+            return (
+                "PASS",
+                "none",
+                f"opportunity_shadow_degraded:settings_read_failed:{verdict}:{detail}",
+            )
         return "PASS", "none", f"opportunity_shadow:{verdict}:{detail}"
 
     if opp.confidence != CONFIDENCE_GOOD:
