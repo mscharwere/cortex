@@ -4,7 +4,8 @@ Calls:
   GET  /api/vacuum/units             — parse zone scores from data[].zones[]
   POST /api/vacuum/trigger           — dispatch a mission
   POST /api/decisions/vacuumops      — log a decision entry (fire-and-forget)
-  GET  /api/cortex/vacuumops-settings — live mop-cadence gate kill switch (fail-closed)
+  GET  /api/cortex/vacuumops-settings — live kill switches, all fail-closed:
+       mop_enabled (mop-cadence gate) + opportunity_actuate (predictive patience)
 
 All calls use:
   Authorization: Bearer {settings.cortex_api_key}
@@ -15,6 +16,7 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §11
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -71,8 +73,49 @@ def _parse_ts(raw: object) -> datetime | None:
         return None
 
 
+def _bool_setting(data: dict, key: str) -> bool:
+    """Read one kill switch out of the settings payload. Fail-CLOSED.
+
+    ONLY a literal `True` is True. A missing key (HomeOps predates the column),
+    a null, and — importantly — the STRING "true" or the integer 1 all resolve
+    to False rather than being truthy-coerced: a flag that actuates real
+    hardware must not be turned on by a serialization accident.
+    """
+    value = data.get(key)
+    if not isinstance(value, bool):
+        log.warning("homeops_vacuumops_settings_flag_missing_or_not_bool", key=key, value=value)
+        return False
+    return value
+
+
 # HomeOps adapter timeout
 _HOMEOPS_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
+
+
+@dataclass(frozen=True)
+class VacuumOpsLiveSettings:
+    """Every live, DB-backed VacuumOps kill switch, read in ONE round trip.
+
+    HomeOps serves all of these from a single row of `cortex_vacuumops_settings`
+    via one `GET /api/cortex/vacuumops-settings`, so CORTEX reads them together
+    rather than issuing a request per flag. Two flags today; the record exists so
+    a third costs a field rather than another per-tick HTTP call.
+
+    ⚠ `read_ok` IS NOT "is anything enabled". It is "did we actually hear back
+    from HomeOps". Both booleans below fail CLOSED to False, which means a
+    confirmed-off switch and an unreachable HomeOps produce byte-identical
+    values — and those are different facts. The mop gate can live with the
+    conflation (its shadow reason covers both), but `r1.opportunity_check` holds
+    invariant 3: "every degraded path returns PASS with a reason that NAMES the
+    degradation." Without this flag the rule could not tell an operator's
+    deliberate "not yet" from a silent outage, which is the exact shape of the
+    2026-08-31 invisible-no-op root cause. Consumers that do not care may ignore
+    it; consumers that log a reason string must not.
+    """
+
+    mop_enabled: bool = False
+    opportunity_actuate: bool = False
+    read_ok: bool = False
 
 
 class HomeOpsAdapter:
@@ -155,33 +198,49 @@ class HomeOpsAdapter:
 
             return scores, zone_info, unit_dry_runs
 
-    async def get_vacuumops_mop_enabled(self) -> bool:
-        """Fetch the live, DB-backed mop-cadence gate kill switch from HomeOps.
+    async def get_vacuumops_settings(self) -> VacuumOpsLiveSettings:
+        """Fetch every live, DB-backed VacuumOps kill switch in ONE round trip.
 
         GET /api/cortex/vacuumops-settings
-        Response: { data: { mop_enabled, mop_enabled_updated_at, mop_enabled_updated_by } }
+        Response: { data: {
+            mop_enabled,          mop_enabled_updated_at,          mop_enabled_updated_by,
+            opportunity_actuate,  opportunity_actuate_updated_at,  opportunity_actuate_updated_by
+        } }
 
-        Replaces the CORTEX_VACUUMOPS_MOP_ENABLED env var (formerly read once at
-        process start via Settings/VacuumOpsConfig). This is called fresh every
-        loop tick by vacuumops_synth.build_snapshot() — no separate cache/TTL on
-        this side. The adaptive tick interval (60-300s, see loop.next_interval)
-        is the only staleness bound, matching the existing unit-level dry_run
-        read path (get_zone_data(), same adapter, no caching either).
+        ONE CALL, NOT ONE PER FLAG. HomeOps serves both switches from the same
+        row of `cortex_vacuumops_settings`, and the loop needs both on the same
+        tick, so reading them separately would double the per-tick request count
+        for zero added freshness — and would additionally let the two flags come
+        from two different instants, which is a state the DB row cannot actually
+        be in. `get_vacuumops_mop_enabled()` and
+        `get_vacuumops_opportunity_actuate()` below are thin wrappers over this
+        method, kept for callers that want exactly one flag; the loop's per-tick
+        path calls this one.
 
-        Fail-CLOSED on every ambiguity, mirroring the module's stance everywhere
-        else (mop.py module docstring, "DEGRADED CONTEXT" section): wet-mopping
-        is a physical action on real floors that runs unsupervised, so anything
-        other than a confirmed `true` resolves to False.
-          - Network error / timeout / non-2xx status  -> False (logged)
-          - Malformed JSON / missing "data" object     -> False (logged)
-          - "mop_enabled" key absent or not a bool     -> False (logged)
-          - Confirmed True or False                    -> that value, no log noise
+        Called fresh every loop tick by vacuumops_synth.build_snapshot() — no
+        cache/TTL on this side. The adaptive tick interval (60-300 s, see
+        loop.next_interval) is the only staleness bound, matching the existing
+        unit-level dry_run read path (get_zone_data(), same adapter, uncached
+        too).
+
+        Fail-CLOSED on every ambiguity, per flag independently:
+          - Network error / timeout / non-2xx status   -> all False, read_ok=False
+          - Malformed JSON / missing "data" object      -> all False, read_ok=False
+          - A key absent or not a bool                  -> THAT flag False, read_ok=True
+          - Confirmed True or False                     -> that value, no log noise
+
+        Note the third case carefully: a HomeOps that answers but predates the
+        `opportunity_actuate` column is NOT a degraded read. We heard back, the
+        answer is "this switch does not exist here", and the fail-closed
+        interpretation of that is a confirmed off — so read_ok stays True. Only
+        "we never got an answer" clears read_ok. See VacuumOpsLiveSettings for
+        why the distinction is load-bearing rather than cosmetic.
 
         Never raises — a HomeOps outage on this read must not take down the tick
         (zone scores are the only hard dependency; see build_snapshot's §8.5
         docstring). This mirrors get_zone_metadata()'s try/except-and-degrade
-        shape below, not get_zone_data()'s raise-on-failure shape — zone scores
-        are load-bearing for the whole tick, this flag is not.
+        shape below, not get_zone_data()'s raise-on-failure shape: zone scores
+        are load-bearing for the whole tick, these flags are not.
         """
         try:
             async with self._client() as client:
@@ -190,19 +249,55 @@ class HomeOpsAdapter:
                 body = r.json()
         except Exception as exc:
             log.warning("homeops_get_vacuumops_settings_failed", error=str(exc))
-            return False
+            return VacuumOpsLiveSettings(read_ok=False)
 
         data = body.get("data") if isinstance(body, dict) else None
         if not isinstance(data, dict):
             log.warning("homeops_vacuumops_settings_malformed", body=body)
-            return False
+            return VacuumOpsLiveSettings(read_ok=False)
 
-        value = data.get("mop_enabled")
-        if not isinstance(value, bool):
-            log.warning("homeops_vacuumops_settings_mop_enabled_missing_or_not_bool", value=value)
-            return False
+        return VacuumOpsLiveSettings(
+            mop_enabled=_bool_setting(data, "mop_enabled"),
+            opportunity_actuate=_bool_setting(data, "opportunity_actuate"),
+            read_ok=True,
+        )
 
-        return value
+    async def get_vacuumops_mop_enabled(self) -> bool:
+        """The live mop-cadence gate kill switch. Fail-closed to False.
+
+        Thin wrapper over get_vacuumops_settings() — see that method for the
+        endpoint, the full fail-closed matrix and why the flags are fetched
+        together. Kept as its own method because the mop gate's contract is
+        "a bool, False on any doubt" and nothing about it needs the record.
+
+        Replaces the CORTEX_VACUUMOPS_MOP_ENABLED env var (formerly read once at
+        process start via Settings/VacuumOpsConfig). Wet-mopping is a physical
+        action on real floors that runs unsupervised, so anything other than a
+        confirmed `true` resolves to False.
+        """
+        return (await self.get_vacuumops_settings()).mop_enabled
+
+    async def get_vacuumops_opportunity_actuate(self) -> bool:
+        """The live predictive-patience actuation switch. Fail-closed to False.
+
+        Thin wrapper over get_vacuumops_settings() — see that method for the
+        endpoint and the full fail-closed matrix.
+
+        This is PR A4's flip, moved out of the source tree. It was a static
+        `opportunity_actuate` field on the job descriptors (jobs.py), which made
+        turning predictive patience on a code change, a review, a deploy — and
+        made turning it OFF the same, at the exact moment someone would want it
+        off fastest. It is now a DB row Carlos can flip, following the same
+        migration `mop_enabled` already made (config.py's field docstring
+        records that transition and the two precedents behind it).
+
+        Fail-closed to False is the strictly conservative direction here, and it
+        is worth naming which direction that is: False means the rule computes
+        its verdict and logs it but cannot withhold a dispatch — i.e. an
+        unreachable HomeOps degrades to CURRENT, pre-A4 behaviour, never to a
+        robot silently declining to clean because a settings read timed out.
+        """
+        return (await self.get_vacuumops_settings()).opportunity_actuate
 
     async def get_zone_metadata(self) -> dict[int, ZoneMeta]:
         """Fetch per-zone structural metadata from HomeOps.

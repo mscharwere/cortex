@@ -106,26 +106,39 @@ class VacuumJob:
     # Intensity arm: a zone overdue by this much gets a deep mop rather than light.
 
     # ── Predictive patience / opportunity gate (r1.opportunity_check) ────────
-    # Spec §4.4 (PR A3) + §7. TWO flags, not one, and that is what buys a free
+    # Spec §4.4 (PR A3) + §7. STILL TWO FLAGS, and that is what buys a free
     # soak: the computation and the actuation are switched independently, so the
     # rule can log a real verdict into every decision row for two weeks without
-    # being able to change a single dispatch. Same shape as the mop-cadence gate
-    # Carlos already ran in shadow mode.
+    # being able to change a single dispatch. But only ONE of the two lives
+    # here now.
+    #
+    #   opportunity_enabled  (below)  — per-job, STATIC, this file.
+    #   opportunity_actuate           — global, LIVE, DB-backed. It MOVED to
+    #                                   VacuumOpsConfig; HomeOps
+    #                                   `cortex_vacuumops_settings` is the source
+    #                                   of truth and the loop re-reads it every
+    #                                   tick. Do not re-add it here — a static
+    #                                   field shadowing a live switch is the
+    #                                   confusing-state failure config.py's
+    #                                   mop_enabled docstring documents.
+    #
+    # This is exactly the shape the mop-cadence gate already has — static
+    # per-job `mop_enabled` opt-in × live global `cfg.mop_enabled` kill switch —
+    # and the flag moved for the same reason mop_enabled left its env var: a
+    # switch you can only flip by editing source, reviewing and redeploying is a
+    # switch you cannot flip in a hurry, and "in a hurry" is the case a kill
+    # switch exists for. Full reasoning in config.py's field docstring.
     opportunity_enabled: bool = False
     # Turns the COMPUTATION on. Consults the A1 learner, forms a verdict, writes
-    # the chained-deferral counter, logs the read. Still cannot defer anything.
-    # True on Saros1FRoomsJob ONLY at A3 — it is the one job with usable mission
-    # durations and priors worth forecasting (design memo §5.3, §5.4).
-    opportunity_actuate: bool = False
-    # Turns the VERDICT on — lets a better_window become a comfort FAIL and a
-    # fit_marginal an AMBIGUOUS.
+    # the chained-deferral counter, logs the read. Cannot, on its own, defer
+    # anything — actuation is the other flag's job.
     #
-    # ⛔ DO NOT FLIP THIS. It is PR A4's entire content. It is a behaviour change
-    # to the live dispatch path and is gated on BOTH a >=14-day soak against the
-    # four-signal table in spec §4.5 (better_window rate 5-25%, max defer streak
-    # <=3, unavailable rate <10%) AND Carlos's explicit go-ahead. Flipping it
-    # early does not "test it sooner" — it spends the evidence the soak exists to
-    # collect.
+    # True on Saros1FRoomsJob ONLY — it is the one job with usable mission
+    # durations and priors worth forecasting (design memo §5.3, §5.4). This
+    # remains the per-job gate on the whole feature, and it is the stronger of
+    # the two: the live global switch can only ever act on a job that has
+    # already opted in here, so leaving this False is an unconditional opt-out
+    # that no DB row can override.
 
 
 @dataclass

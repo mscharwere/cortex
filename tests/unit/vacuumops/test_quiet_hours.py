@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from cortex_python.adapters.homeops_adapter import VacuumOpsLiveSettings
 from cortex_python.modules.vacuumops.utils import (
     QUIET_HOURS_1F_END_HOUR,
     QUIET_HOURS_1F_START_HOUR,
@@ -158,7 +159,7 @@ def _mock_adapters(*, home_quiet_hours: bool):
     homeops = MagicMock()
     homeops.get_zone_data = AsyncMock(return_value=({19: 50.0}, {}, {}))
     homeops.get_zone_metadata = AsyncMock(return_value={})
-    homeops.get_vacuumops_mop_enabled = AsyncMock(return_value=False)
+    homeops.get_vacuumops_settings = AsyncMock(return_value=VacuumOpsLiveSettings(read_ok=True))
     return ha, homeops
 
 

@@ -2,8 +2,11 @@
 
 Separate from per-job descriptors (jobs.py). Most fields are loaded from env +
 module config block at process start (build_vacuumops_config()). `mop_enabled`
-is the one exception — it is live and DB-backed (HomeOps), re-read every loop
-tick rather than fixed at process start; see its field docstring below.
+and `opportunity_actuate` are the exceptions — both are live and DB-backed
+(HomeOps `cortex_vacuumops_settings`, one shared read per tick), re-read every
+loop tick rather than fixed at process start; see their field docstrings below.
+`opportunity_actuate_degraded` is not a setting at all but the per-tick
+provenance bit that goes with the second of those; it is documented with it.
 
 Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §5.1
 """
@@ -248,6 +251,66 @@ class VacuumOpsConfig:
     # opportunity._ACTIVE_PERCENTILE_FIELDS).
     opportunity_duration_percentile: str = "p75"
 
+    # Master actuation switch for the predictive-patience rule
+    # (r1.opportunity_check). LIVE AND DB-BACKED, exactly like mop_enabled above
+    # — same HomeOps table (`cortex_vacuumops_settings`), same endpoint
+    # (GET/PATCH /api/cortex/vacuumops-settings), same single per-tick read
+    # (HomeOpsAdapter.get_vacuumops_settings() returns both flags in one round
+    # trip), same `dataclasses.replace()` threading in loop.vacuumops_loop().
+    # NOT env-sourced, and deliberately NOT set by build_vacuumops_config().
+    #
+    # WHAT MOVED, AND WHY IT MOVED HERE RATHER THAN STAYING ON THE JOB.
+    # This was `VacuumJob.opportunity_actuate`, a static per-job field, False on
+    # every job, whose flip WAS the entire content of planned PR A4. Two
+    # problems with that: turning the feature on required a code change, review
+    # and redeploy — and so did turning it OFF, at precisely the moment someone
+    # would want it off fastest. That is the same complaint that moved
+    # mop_enabled out of an env var (see its docstring above), and it has the
+    # same answer.
+    #
+    # It lands on the CONFIG rather than staying per-job because the resulting
+    # shape then matches the mop gate's exactly, which is the shape that is
+    # already proven here:
+    #     mop:          global live `cfg.mop_enabled`  × per-job `job.mop_enabled`
+    #     opportunity:  global live `cfg.opportunity_actuate`
+    #                                                 × per-job `job.opportunity_enabled`
+    # A per-job live switch would need a settings key per job to control four
+    # jobs that are all already opted out statically. `job.opportunity_enabled`
+    # (True on Saros1FRoomsJob alone) remains the per-job opt-in and still gates
+    # everything: this flag can only ever act on a job that already opted in.
+    #
+    # Defaults to FALSE: opt-in, not opt-out, and fail-closed on every read
+    # problem — see HomeOpsAdapter.get_vacuumops_settings(). Note which way
+    # "closed" points here. False does NOT mean "the robot stops"; it means the
+    # rule computes its verdict, logs it, and cannot withhold a dispatch. An
+    # unreachable HomeOps therefore degrades to pre-A4 behaviour (clean as
+    # before), never to a robot quietly declining to clean because a settings
+    # read timed out.
+    #
+    # ⚠ FLIPPING THIS IS STILL GATED, the gate just is not the source tree any
+    # more. Spec §4.5 requires a >=14-day soak against the four-signal table
+    # (better_window rate 5-25%, max defer streak <=3, unavailable rate <10%)
+    # AND Carlos's explicit go-ahead before the DB row goes true. Shipping the
+    # switch is not shipping the decision.
+    opportunity_actuate: bool = False
+
+    # Did this tick actually hear back from HomeOps about opportunity_actuate?
+    #
+    # A companion to the flag, not a second flag. Because the read fails closed,
+    # `opportunity_actuate=False` is ambiguous by construction: it means EITHER
+    # "Carlos has not turned it on yet" OR "HomeOps was unreachable". mop.py can
+    # live with that conflation; opportunity_check cannot, because it holds
+    # invariant 3 ("every degraded path returns PASS with a reason that NAMES
+    # the degradation") and the 2026-08-31 incident it was written against was
+    # exactly a gate that no-op'd invisibly. This bit is what lets the decision
+    # log say `opportunity_shadow_degraded:settings_read_failed:...` instead of
+    # silently reusing the deliberate-off reason string.
+    #
+    # Defaults False = "not degraded", so a directly-constructed config (tests,
+    # or any path that never receives a live value) does not fabricate an
+    # outage it did not observe.
+    opportunity_actuate_degraded: bool = False
+
     # ── patience() — two-band step + absolute cap (§4.3) ─────────────────────
     # PRIMARY starvation guard. Hours a zone may sit above its dispatch
     # threshold before patience collapses to 0 and the opportunity rule goes
@@ -284,11 +347,16 @@ def build_vacuumops_config(settings: Settings) -> VacuumOpsConfig:
     it is meant to be operator-controlled, wire it in this function and assert
     it in tests/unit/vacuumops/test_mop.py::TestSettingsWiring.
 
-    mop_enabled is intentionally NOT wired here — it is no longer env-sourced.
-    See the field's docstring above for the live DB-backed replacement; the
-    per-tick wiring lives in loop.vacuumops_loop(), and its own regression
-    coverage lives in TestLiveMopEnabledWiring (test_mop.py), analogous to
-    what TestSettingsWiring does for the fields that remain env-sourced.
+    mop_enabled and opportunity_actuate are intentionally NOT wired here — they
+    are not env-sourced. See their field docstrings above for the live DB-backed
+    mechanism; the per-tick wiring lives in loop.vacuumops_loop(), and its
+    regression coverage lives in TestLivePerTickWiring (test_mop.py) and
+    TestLiveActuateWiring (test_opportunity_check.py), analogous to what
+    TestSettingsWiring does for the fields that remain env-sourced.
+
+    The dataclass defaults for both are the fallback for direct construction
+    only (tests, or a code path that never receives a live value) and are never
+    the values the running loop actually dispatches on.
     """
     return VacuumOpsConfig(
         dry_run=settings.cortex_vacuumops_dry_run,

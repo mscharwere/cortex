@@ -31,7 +31,7 @@ import uuid
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import redis.asyncio as aioredis
 import structlog
@@ -77,6 +77,12 @@ from cortex_python.modules.vacuumops.schemas import (
     ZoneOutcome,
 )
 from cortex_python.modules.vacuumops.utils import parse_pattern_time as _parse_pattern_time_util
+
+if TYPE_CHECKING:
+    # Type-only: the adapters are imported lazily inside vacuumops_loop() to
+    # avoid a circular import at module load, and this annotation must not
+    # reintroduce one.
+    from cortex_python.adapters.homeops_adapter import VacuumOpsLiveSettings
 
 log = structlog.get_logger()
 
@@ -445,6 +451,41 @@ async def _fetch_mission_stats(
     return stats
 
 
+def build_tick_config(
+    base: VacuumOpsConfig, live_settings: VacuumOpsLiveSettings
+) -> VacuumOpsConfig:
+    """Fold this tick's live HomeOps kill switches onto the process-scoped config.
+
+    A named function rather than an inline `dataclasses.replace(...)` in
+    vacuumops_loop(), for exactly the reason build_vacuumops_config() is one: a
+    kill switch that ships UNWIRED is the known failure mode in this module
+    (ARIIA finding 1 on the original mop_enabled env var — the field existed,
+    the source was documented, and nothing connected them). Tests that build a
+    VacuumOpsConfig directly cannot catch that class of bug; they have to go
+    through the mapping. `opportunity_actuate` is the second flag to make this
+    journey and it must not repeat the first one's mistake.
+
+    ⚠ EVERY LIVE FLAG BELONGS HERE. If you add one to VacuumOpsLiveSettings,
+    map it in this function and assert it in
+    test_opportunity_check.py::TestLiveActuateWiring — otherwise the DB row will
+    exist, the operator will flip it, and nothing will happen.
+
+    Copy, never mutate: `base` is shared across every tick for the life of the
+    process, so a flip must produce a new object rather than edit the one the
+    next tick will read.
+    """
+    return dataclasses.replace(
+        base,
+        mop_enabled=live_settings.mop_enabled,
+        opportunity_actuate=live_settings.opportunity_actuate,
+        # Provenance, not a switch: `read_ok` False means we never heard back, so
+        # the False above is a fail-closed default rather than an observed value.
+        # r1.opportunity_check needs the difference to name a settings outage in
+        # the decision log instead of logging it as an ordinary shadow tick.
+        opportunity_actuate_degraded=not live_settings.read_ok,
+    )
+
+
 async def build_opportunity_context(
     ctx: ContextSnapshot,
     jobs: list[VacuumJob],
@@ -811,7 +852,7 @@ async def _set_per_zone_cooldowns(
 
 
 async def _clear_opportunity_zone_state(
-    batch: list[BatchEntry], redis_client: aioredis.Redis
+    batch: list[BatchEntry], redis_client: aioredis.Redis, *, actuating: bool
 ) -> None:
     """Clear the predictive-patience Redis state for every dispatched zone (§4.4).
 
@@ -824,12 +865,12 @@ async def _clear_opportunity_zone_state(
     Cleared unconditionally, for every dispatched zone, whatever the job.
 
     `opportunity_defer_streak` — the chained-deferral instrument, and this one is
-    cleared ONLY for jobs that are actually actuating. §4.4 says "cleared on
-    dispatch", which is correct under A4: there, a dispatch can only happen on a
-    tick the rule did not defer, so clearing on dispatch and clearing on a
-    non-`better_window` verdict are the same event.
+    cleared ONLY on ticks where actuation is live. §4.4 says "cleared on
+    dispatch", which is correct while actuating: there, a dispatch can only
+    happen on a tick the rule did not defer, so clearing on dispatch and clearing
+    on a non-`better_window` verdict are the same event.
 
-    ⚠ UNDER A3 THEY ARE NOT THE SAME EVENT, AND CLEARING HERE WOULD DESTROY THE
+    ⚠ IN SHADOW THEY ARE NOT THE SAME EVENT, AND CLEARING HERE WOULD DESTROY THE
     MEASUREMENT. In LOG-ONLY mode every tick passes and dispatches regardless of
     the verdict, so an unconditional clear-on-dispatch would reset the counter
     every single tick and pin it at 1 forever — and the A4 go/no-go's "max defer
@@ -837,17 +878,19 @@ async def _clear_opportunity_zone_state(
     entire purpose is to answer "would this zone have got stuck always-one-hour-
     away?", which is a counterfactual about a dispatch that, in shadow, did not
     happen. `r1._reset_defer_streak` maintains it from the verdict sequence
-    instead. This branch exists so that flipping to A4 also restores the literal
-    §4.4 semantics without needing a second code change.
+    instead. This branch is what restores the literal §4.4 semantics the moment
+    actuation goes live, with no second code change.
+
+    `actuating` IS REQUIRED AND KEYWORD-ONLY, WITH NO DEFAULT. It used to be read
+    per-zone off `job.opportunity_actuate`; that field is gone, because the
+    switch is now a live HomeOps setting resolved once per tick and handed down
+    (`tick_vacuumops_cfg.opportunity_actuate`). Since a wrong value here silently
+    corrupts soak evidence rather than raising, the caller is made to state it
+    rather than inherit a default that would be right only by luck.
     """
     for entry in batch:
-        try:
-            job = _job_for_zone(entry.zone)
-        except ValueError:
-            log.warning("opportunity_clear_unknown_zone", zone_id=entry.zone)
-            continue
         keys = [over_threshold_since_key(entry.zone)]
-        if job.opportunity_actuate:
+        if actuating:
             keys.append(_OPPORTUNITY_DEFER_STREAK_KEY.format(zone_id=entry.zone))
         try:
             await redis_client.delete(*keys)
@@ -1206,10 +1249,10 @@ async def vacuumops_loop(settings: Settings) -> None:
     # Occupancy prior learner (spec §4.2 / PR A1). Writes cortex_occupancy_priors.
     # As of A3 this store IS read on the live path: `build_opportunity_context`
     # hands it to `run_r1` as `opp_ctx.prior_source`, where `opportunity_check`
-    # consults it. That rule is still LOG-ONLY (`opportunity_actuate=False` on
-    # every job), so it changes no dispatch decision yet — A4 is the actuation
-    # flip. It shipped first because its sample clock is wall-clock bound and
-    # everything else in the train is engineering time.
+    # consults it. Whether that rule can act is now a per-tick question, not a
+    # deploy-time one: `opportunity_actuate` is a live HomeOps setting, ships
+    # false, and fails closed. It shipped first because its sample clock is
+    # wall-clock bound and everything else in the train is engineering time.
     prior_store = PriorStore(
         db_session_factory,
         slot_minutes=vacuumops_cfg.prior_learner_slot_minutes,
@@ -1234,10 +1277,13 @@ async def vacuumops_loop(settings: Settings) -> None:
         "vacuumops_loop.started",
         dry_run=vacuumops_cfg.dry_run,
         prior_learner_enabled=vacuumops_cfg.prior_learner_enabled,
-        # mop_enabled is no longer static config — it's read fresh from HomeOps
-        # every tick (see live_mop_enabled below), so there is nothing meaningful
-        # to log at startup beyond the source.
+        # Neither kill switch is static config any more — both are read fresh
+        # from HomeOps every tick (see live_settings below), so there is nothing
+        # meaningful to log at startup beyond the source. Logged as two lines
+        # rather than one shared one so that grepping either flag's provenance
+        # finds it by name.
         mop_enabled_source="homeops_db(live, per-tick)",
+        opportunity_actuate_source="homeops_db(live, per-tick)",
     )
 
     ctx: ContextSnapshot | None = None
@@ -1274,15 +1320,18 @@ async def vacuumops_loop(settings: Settings) -> None:
                     log.error("prior_learner_tick_failed", tick_id=tick_id, error=str(exc))
 
             # Build snapshot
-            # build_snapshot returns (ctx, unit_dry_runs, live_mop_enabled):
-            #   unit_dry_runs      dict[robot_name → dry_run bool], from HomeOps
-            #                      vac_units.dry_run column.
-            #   live_mop_enabled   the mop-cadence gate's kill switch, from HomeOps
-            #                      cortex_vacuumops_settings (fail-closed to False
-            #                      on any read problem — see HomeOpsAdapter
-            #                      .get_vacuumops_mop_enabled()).
+            # build_snapshot returns (ctx, unit_dry_runs, live_settings):
+            #   unit_dry_runs   dict[robot_name → dry_run bool], from HomeOps
+            #                   vac_units.dry_run column.
+            #   live_settings   every live kill switch from HomeOps
+            #                   cortex_vacuumops_settings, read in ONE call:
+            #                   mop_enabled (mop-cadence gate) and
+            #                   opportunity_actuate (predictive patience), plus
+            #                   read_ok. All fail-closed to False on any read
+            #                   problem — see HomeOpsAdapter
+            #                   .get_vacuumops_settings().
             try:
-                ctx, unit_dry_runs, live_mop_enabled = await build_snapshot(
+                ctx, unit_dry_runs, live_settings = await build_snapshot(
                     tick_id, ha_adapter, homeops_adapter, settings
                 )
             except Exception as exc:
@@ -1300,15 +1349,40 @@ async def vacuumops_loop(settings: Settings) -> None:
                 await asyncio.sleep(60)
                 continue
 
-            # Tick-scoped VacuumOpsConfig: everything except mop_enabled is fixed
-            # for the life of the process (vacuumops_cfg, built once above); the
-            # mop-cadence gate's kill switch is live and must reflect what HomeOps
-            # said THIS tick, so it is threaded in per-tick via dataclasses.replace
-            # rather than mutating the shared vacuumops_cfg object. Only
-            # resolve_batch_mop consumes cfg.mop_enabled (evaluate_zone's
-            # vacuumops_cfg param is only ever read for l1_overflow_confidence) —
-            # so only the mop resolution below is passed this tick-scoped copy.
-            tick_vacuumops_cfg = dataclasses.replace(vacuumops_cfg, mop_enabled=live_mop_enabled)
+            # Tick-scoped VacuumOpsConfig. Everything else on it is fixed for the
+            # life of the process (vacuumops_cfg, built once above); the two live
+            # kill switches must reflect what HomeOps said THIS tick, so they are
+            # threaded in per-tick via dataclasses.replace rather than by mutating
+            # the shared vacuumops_cfg object. Copy-per-tick is what makes a flip
+            # take effect on the very next tick with no cache to invalidate.
+            #
+            #   mop_enabled          → consumed by resolve_batch_mop (below).
+            #   opportunity_actuate  → consumed by r1.opportunity_check, reached
+            #                          via opp_ctx.cfg, and by
+            #                          _clear_opportunity_zone_state on dispatch.
+            #
+            # opportunity_actuate_degraded is NOT a switch; it carries whether we
+            # actually heard back, so the rule can name a settings outage in the
+            # decision log instead of silently logging it as an ordinary shadow
+            # tick. Both flags fail closed, which makes the two states otherwise
+            # indistinguishable. See VacuumOpsLiveSettings.
+            #
+            # ⚠ ONCE THIS EXISTS, NOTHING ELSE IN THE TICK MAY USE
+            # `vacuumops_cfg`. The tick-scoped copy is a superset — every static
+            # field is carried through unchanged by build_tick_config — so there
+            # is no consumer that needs the process-scoped object, and passing
+            # it anywhere below would silently pin that consumer to the
+            # dataclass defaults for the live flags. That failure is invisible:
+            # the DB column exists, the adapter reads it, the rule checks the
+            # field, and the operator's flip does nothing. It is ARIIA finding 1
+            # ("shipped unwired") one layer up from where it was found.
+            #
+            # Rather than rely on reviewers spotting the wrong identifier, the
+            # rule is mechanical and test-pinned:
+            # test_opportunity_check.py::TestTickScopedConfigIsTheOnlyOne parses
+            # this function and fails if any call below passes the
+            # process-scoped config.
+            tick_vacuumops_cfg = build_tick_config(vacuumops_cfg, live_settings)
 
             # Predictive-patience context (PR A3). Built fresh each tick because
             # its `reads` sink is tick-scoped: it carries this tick's
@@ -1323,7 +1397,12 @@ async def vacuumops_loop(settings: Settings) -> None:
                     ctx=ctx,
                     jobs=ACTIVE_JOBS,
                     prior_source=prior_store,
-                    cfg=vacuumops_cfg,
+                    # TICK-SCOPED, not the process-scoped vacuumops_cfg. This is
+                    # the whole delivery path for the live opportunity_actuate
+                    # flag: opportunity_check reads it off opp_ctx.cfg, so
+                    # passing the process-scoped copy here would pin the rule to
+                    # the dataclass default and no DB flip would ever reach it.
+                    cfg=tick_vacuumops_cfg,
                     homeops_adapter=homeops_adapter,
                 )
             except Exception as exc:
@@ -1364,7 +1443,7 @@ async def vacuumops_loop(settings: Settings) -> None:
                         redis_client=redis_client,
                         settings=settings,
                         litellm_client=litellm_client,
-                        vacuumops_cfg=vacuumops_cfg,
+                        vacuumops_cfg=tick_vacuumops_cfg,
                         patterns=patterns,
                         l1_results=l1_results,
                         opp_ctx=opp_ctx,
@@ -1459,15 +1538,22 @@ async def vacuumops_loop(settings: Settings) -> None:
                             tick_id=tick_id,
                             settings=settings,
                             homeops_adapter=homeops_adapter,
-                            vacuumops_cfg=vacuumops_cfg,
+                            vacuumops_cfg=tick_vacuumops_cfg,
                             dry_run=effective_dry_run,
                             mop_decision=mop_decision,
                         )
                         await _set_per_zone_cooldowns(batch, ACTIVE_JOBS, redis_client)
-                        await _set_robot_cooldown(robot, vacuumops_cfg, redis_client)
-                        # §4.4: the starvation clock and (under A4) the deferral
-                        # streak end when the zone actually gets its mission.
-                        await _clear_opportunity_zone_state(batch, redis_client)
+                        await _set_robot_cooldown(robot, tick_vacuumops_cfg, redis_client)
+                        # §4.4: the starvation clock and (when actuating) the
+                        # deferral streak end when the zone actually gets its
+                        # mission. `actuating` comes from THIS tick's live
+                        # HomeOps read, so a flip changes the clearing semantics
+                        # on the next tick without a deploy.
+                        await _clear_opportunity_zone_state(
+                            batch,
+                            redis_client,
+                            actuating=tick_vacuumops_cfg.opportunity_actuate,
+                        )
                         import pytz
 
                         pst = pytz.timezone("America/Los_Angeles")
