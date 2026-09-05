@@ -20,14 +20,45 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §7.2
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 import redis.asyncio as aioredis
+import structlog
 
+from cortex_python.modules.vacuumops.config import VacuumOpsConfig
 from cortex_python.modules.vacuumops.jobs import VacuumJob
 from cortex_python.modules.vacuumops.noise import FLOOR_ROOM_MAP, noise_budget, noise_impact
-from cortex_python.modules.vacuumops.schemas import ContextSnapshot, OccupancyReading, ZoneMeta
+from cortex_python.modules.vacuumops.opportunity import (
+    IMPATIENT,
+    duration_estimate,
+    format_opportunity,
+    forward_slot_keys,
+    lookahead_slot_count,
+    opportunity,
+    over_threshold_since_key,
+    patience,
+    patience_band,
+    required_slot_count,
+)
+from cortex_python.modules.vacuumops.priors import (
+    CONFIDENCE_GOOD,
+    CONFIDENCE_UNAVAILABLE,
+    HOUSEHOLD_TZ,
+    PriorObservation,
+    SlotPrior,
+)
+from cortex_python.modules.vacuumops.schemas import (
+    ContextSnapshot,
+    OccupancyReading,
+    OpportunityRead,
+    ZoneMeta,
+)
+
+log = structlog.get_logger()
 
 # Redis key for per-robot cooldown (D12).
 # cortex:vacuumops:robot_cooldown:<robot>
@@ -524,6 +555,546 @@ def noise_radius_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tu
     return "PASS", "none", "no_noise_radius_overlap"
 
 
+# ── opportunity_check — predictive patience, LOG-ONLY (PR A3) ────────────────
+#
+# Spec: cortex_vacuum_patience_and_pause_resume_implementation_spec.md §4.4
+# Design memo: cortex_predictive_patience_design.md §3.1-§3.3, §5.1-§5.5
+#
+# WHAT THIS IS
+# ------------
+# The third comfort rule. It asks a question none of the other rules ask: not
+# "is now acceptable?" but "is a materially BETTER window arriving soon enough
+# to be worth waiting for?". The maths lives in `opportunity.py` (PR A2) and is
+# pure; everything here is the I/O and adapter layer that turns `run_r1`'s live
+# objects into that module's keyword arguments and its answer into a decision-log
+# reason string.
+#
+# WHAT THIS IS NOT
+# ----------------
+# ⚠ THIS RULE CANNOT CHANGE A DISPATCH OUTCOME IN THIS PR. Every job ships with
+# `opportunity_actuate = False`, and the shadow branch below returns PASS before
+# any verdict is allowed to become a FAIL or an AMBIGUOUS. The rule computes a
+# real verdict, writes a real deferral-streak counter and logs a real reason
+# string — and then passes anyway. PR A4 is the one-line flip that lets the
+# verdict act, and it is gated on a 14-day soak (§4.5's four-signal table) plus
+# Carlos's explicit go-ahead. Do not flip `opportunity_actuate` in this file.
+#
+# It is also NOT an occupancy gate and must never be mistaken for one. It reasons
+# about PREDICTED occupancy from a learned prior. Actual, measured occupancy is
+# the business of `zone_active_use_check` / `floor_clearance_check`, which are
+# EFFECTIVENESS rules that `run_r1` short-circuits on with a bare `return`
+# before any comfort rule is reached. See invariant 2 below.
+#
+# ────────────────────────────────────────────────────────────────────────────
+# THE THREE STRUCTURAL INVARIANTS THIS RULE EXISTS INSIDE (all test-pinned)
+# ────────────────────────────────────────────────────────────────────────────
+# 1. IT CAN NEVER FORCE A DISPATCH. The return type is the same
+#    `(result, gate_failed, reason)` triple as every other R1 rule, and the only
+#    values this function can produce are PASS / FAIL / AMBIGUOUS on the
+#    "comfort" tier. There is no code path by which it can turn another rule's
+#    FAIL into a PASS, and no path by which it can cause a dispatch that would
+#    not otherwise have happened. Its maximum authority is to withhold.
+#
+# 2. IT CAN NEVER RUN BEFORE, OR WEAKEN, THE HARDENED OCCUPANCY GATE. The
+#    effectiveness rules return out of `run_r1` entirely on FAIL. A degraded
+#    prior store, an unreachable Redis, a cold learner — none of them can reach
+#    backwards past that `return`. The 2026-08-31 incident (three dispatches into
+#    occupied 1F rooms) is structurally out of this rule's reach, and
+#    `test_opportunity_never_precedes_effectiveness_gate` pins the ordering so a
+#    future refactor cannot silently reorder it into the effectiveness block.
+#
+# 3. EVERY DEGRADED PATH RETURNS PASS WITH A REASON THAT NAMES THE DEGRADATION.
+#    Never a silent no-op. The 2026-08-31 root cause was a gate that no-op'd
+#    invisibly — a rule that fails open without saying so in the decision log is
+#    the same bug wearing a different hat. Every `return` below carries a reason
+#    string, and the fail-open matrix is enumerated in `_OPPORTUNITY_FAIL_OPEN`
+#    so a test can assert the set is complete rather than trusting inspection.
+#
+# WHY THE PSEUDOCODE'S CALL ORDER IS NOT THE CODE'S CALL ORDER
+# ------------------------------------------------------------
+# Spec §4.4 sketches `opportunity(...)` first and `patience(...)` second. This
+# implementation computes patience FIRST, deliberately. `patience` scales the
+# forward horizon — `lookahead_slot_count(patience_value=IMPATIENT)` is exactly
+# zero slots — so an impatient zone cannot defer to anything even if the read
+# were computed. Evaluating patience first is therefore outcome-identical and
+# skips a per-slot database read per zone per tick on the path where the answer
+# cannot matter. The pseudocode was a sketch of the decision, not of the I/O.
+#
+# ON BUNDLING (§5.5) — THE GUARD IS STRUCTURAL, NOT A RUNTIME `if`
+# -----------------------------------------------------------------
+# §4.4's pseudocode opens with `if _is_bundled(zone_id, ctx)`. That predicate
+# cannot be written, because at `run_r1` time the answer does not exist yet:
+# bundling is decided in `loop.assemble_batch`, strictly AFTER every zone
+# outcome has been produced. A bundle passenger is by definition a zone that
+# FAILED R0 with `score_below_threshold` (`loop.py`, the D11 bundle sweep), so
+# `evaluate_zone` returned at the R0 gate and this rule was never reached; and
+# the sweep re-checks eligibility through `_zone_effective_simple` /
+# `_noise_acceptable_simple`, which do not call `run_r1` at all.
+#
+# So the §5.5 requirement — "never shrink a batch" — is guaranteed by the
+# control flow rather than by a branch, which is a strictly stronger guarantee
+# than the pseudocode asked for. It is pinned by
+# `test_bundle_sweep_never_consults_opportunity_check`. The threshold guard
+# below is retained anyway as belt-and-braces: it makes the intent legible at
+# the point of use and costs one comparison.
+
+# Redis key: consecutive `better_window` verdicts for a zone. The instrument the
+# A4 go/no-go reads (§4.5: max streak <=3 green, >=6 red). "Always one hour away"
+# is the classic pathology of this mechanism class and is easy to ship blind.
+_OPPORTUNITY_DEFER_STREAK_KEY = "cortex:vacuumops:opportunity_defer_streak:{zone_id}"
+
+# A streak is a statement about a run of CONSECUTIVE ticks, so it must not
+# outlive the run. 24h is far longer than any plausible streak (the 6h patience
+# hard cap bounds a real one) and exists only so a zone that stops being
+# evaluated — job disabled, zone removed — cannot leave a stale number behind to
+# be misread as soak evidence months later.
+_OPPORTUNITY_DEFER_STREAK_TTL_S = 24 * 3600
+
+# Verdicts. `better_window` is the only one that would defer under A4.
+VERDICT_BETTER_WINDOW = "better_window"
+VERDICT_FIT_MARGINAL = "fit_marginal"
+VERDICT_FIT_OK = "fit_ok"
+
+# The complete fail-open set: every reason PREFIX on which this rule returns
+# PASS without having formed an opinion. Enumerated as data, not left implicit
+# in the branches, so `test_fail_open_matrix_is_complete` can assert that the
+# matrix the spec requires and the matrix the code implements are the same set.
+# Invariant 3 is only meaningful if it is checkable.
+_OPPORTUNITY_FAIL_OPEN: tuple[str, ...] = (
+    "opportunity_disabled",  # job.opportunity_enabled is False
+    "opportunity_inert",  # no prior source wired in (feature absent)
+    "opportunity_skipped",  # bundle-candidate guard (§5.5)
+    "opportunity_impatient",  # patience() == 0: hard cap, score band, or no clock
+    "opportunity_unavailable",  # opportunity() declined to form a read
+    "opportunity_thin",  # a read too thinly evidenced to act on (or escalate on)
+    "opportunity_error",  # unexpected exception; rule is inert, tick survives
+    "opportunity_shadow",  # LOG-ONLY: a real verdict, deliberately not acted on
+)
+
+
+class OpportunityPriorSource(Protocol):
+    """The slice of `priors.PriorStore` this rule needs.
+
+    Narrower than `PriorStoreProtocol` on purpose, and it asks for
+    `read_observations` + `build_prior` rather than the more obvious
+    `read_slot`. `read_slot` is exactly `build_prior(read_observations(...))`, so
+    this costs the same single database read per slot — but it also hands back
+    the raw observations, which is the only place the learner's NATIVE AGE can
+    be established (see `_read_forward_priors`). Going through `build_prior`
+    rather than re-deriving the summary keeps the confidence labelling in A1's
+    hands, where it belongs, so the two cannot drift.
+    """
+
+    async def read_observations(
+        self, entity_id: str, day_of_week: int, slot: int
+    ) -> list[PriorObservation]: ...
+
+    def build_prior(
+        self,
+        entity_id: str,
+        day_of_week: int,
+        slot: int,
+        observations: Sequence[PriorObservation],
+    ) -> SlotPrior: ...
+
+
+@dataclass(frozen=True)
+class OpportunityContext:
+    """The live I/O dependencies `opportunity_check` needs, bundled into one arg.
+
+    WHY A NEW `run_r1` PARAMETER AND NOT A FIELD ON `ContextSnapshot`:
+    `ContextSnapshot` is a per-tick DATA snapshot. It is serialised into the
+    decision log (`loop.py`'s `zone_scores` dump) and is deliberately free of
+    live handles. Hanging a database-backed store off it would make a
+    log-serialisable value hold an open session factory, and would mean every
+    existing `ContextSnapshot` construction site in the tests had to grow a
+    dependency it does not use. A single optional keyword argument on `run_r1`
+    leaves all ~40 existing call sites and fixtures untouched.
+
+    WHY ONE OBJECT AND NOT FIVE PARAMETERS: `run_r1` already takes eight
+    arguments. The prior source, the config, the tracked entity and the two
+    stats payloads are one cohesive dependency — they are all "the things the
+    opportunity rule needs from outside the tick snapshot" — and they arrive and
+    depart together.
+
+    `None` for the whole object means the feature is not wired in. That is a
+    supported state, not an error: it returns PASS with `opportunity_inert`,
+    which keeps every pre-A3 caller (and every existing test) working — the
+    RESULT and the GATE are unchanged, which is everything that can reach a
+    robot.
+
+    ⚠ "UNCHANGED" DOES NOT MEAN THE REASON STRING IS BYTE-FOR-BYTE IDENTICAL.
+    On an opportunity-enabled job the inert path APPENDS
+    `|opportunity_inert:no_prior_source` to the decision-log reason. That is
+    invariant 3 deliberately at work — every degraded or inert path must NAME
+    itself, because a silent no-op is the exact shape of the 2026-08-31 root
+    cause. Pinned by
+    `test_run_r1_result_and_gate_are_unchanged_when_no_context_is_supplied`.
+    """
+
+    prior_source: OpportunityPriorSource
+    cfg: VacuumOpsConfig
+
+    prior_entity_id: str
+    # The entity whose learned prior is consulted. A1 learns THE BINARY THE GATE
+    # READS (`binary_sensor.first_floor_occupancy_status`) rather than
+    # reconstructing a floor from its member areas, which is what removed the
+    # design memo's OR-vs-MEAN calibration gap (§4.2). The other four tracked
+    # entities are diagnostic and are deliberately NOT consulted here.
+
+    zone_stats: Mapping[int, Mapping[str, Any]] = field(default_factory=dict)
+    robot_stats: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    # `get_vacuum_mission_stats` payloads, fetched ONCE PER TICK by the loop and
+    # keyed by zone_id / robot. Not fetched here: this function runs once per
+    # (job, zone) and an HTTP call per zone per tick would put a network
+    # dependency inside the rule tier. An absent key is not an error — it
+    # degrades to `duration_unavailable`, which is a named fail-open path.
+
+    slot_minutes: int = 30
+    tz: ZoneInfo = HOUSEHOLD_TZ
+
+    reads: dict[int, OpportunityRead] = field(default_factory=dict)
+    # OUT-PARAMETER: `opportunity_check` deposits the OpportunityRead it computed
+    # here, keyed by zone_id, so `evaluate_zone` can hand it to the L1 prompt
+    # (spec §4.4: "the OpportunityRead goes into the L1 prompt verbatim").
+    #
+    # An out-parameter rather than a widened return type because `run_r1` returns
+    # the flat `(result, gate_failed, reason)` triple that all ~40 of its call
+    # sites and every R1 rule share; widening it to carry one optional rule's
+    # detail would touch every one of them to serve a single consumer. This
+    # mirrors the `l1_results` out-param `evaluate_zone` already uses for exactly
+    # the same reason. The dataclass is frozen — the BINDING cannot be swapped —
+    # while the dict it points at is deliberately mutable, and its lifetime is
+    # one tick because the loop builds a fresh context each time.
+
+    def record(self, zone_id: int, read: OpportunityRead) -> None:
+        """Deposit a computed read for the L1 prompt. See `reads`."""
+        self.reads[zone_id] = read
+
+
+async def _read_over_threshold_since(
+    redis_client: aioredis.Redis,
+    zone_id: int,
+    zone_score: float,
+    dispatch_threshold: float,
+    now: datetime,
+) -> datetime | None:
+    """When this zone FIRST crossed its dispatch threshold, or None.
+
+    ⚠ NONE MUST MEAN IMPATIENT, AND EVERY FAILURE PATH HERE MUST PRODUCE NONE.
+    `patience()` returns IMPATIENT for `over_threshold_since=None`, which makes
+    the whole rule inert — the safe direction, because without the clock the
+    starvation hard cap cannot fire and a rule that could defer indefinitely must
+    not be allowed to run at all. The danger is the opposite mistake: a fallback
+    that substitutes "now" for an unreadable key would restart the starvation
+    clock on every tick and make a zone INFINITELY PATIENT, silently disabling
+    the primary starvation guard. So every exception below returns None, and
+    none of them invent a timestamp.
+
+    SETNX-then-GET in the same call, per `opportunity.patience()`'s contract:
+    the key is written on the first tick a zone is seen above threshold and read
+    back immediately, so a None return means Redis is unreachable or the value is
+    corrupt — never "the zone only just crossed".
+    """
+    # `now` is the TICK timestamp, not wall clock. Every other time input in
+    # this rule comes from `ctx.timestamp`, and mixing in a second clock would
+    # make the starvation cap depend on how long the tick itself took — and
+    # would make the whole rule untestable at a fixed instant.
+    key = over_threshold_since_key(zone_id)
+    try:
+        if zone_score >= dispatch_threshold:
+            # No TTL, deliberately. An expiring key would delete the starvation
+            # clock of a zone that has been waiting a long time, and the next
+            # tick would re-seed it at "now" — turning a zone that had exceeded
+            # the 6h hard cap back into a patient one. That is precisely the
+            # failure the cap exists to prevent, so an orphaned key (cleared on
+            # dispatch, see `loop._clear_opportunity_zone_state`) is the better
+            # of the two risks.
+            await redis_client.set(key, now.isoformat(), nx=True)
+        raw = await redis_client.get(key)
+    except Exception as exc:  # noqa: BLE001 — any Redis failure means "no clock"
+        log.warning("opportunity_over_threshold_read_failed", zone_id=zone_id, error=str(exc))
+        return None
+
+    if not raw:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        parsed = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        log.warning("opportunity_over_threshold_unparseable", zone_id=zone_id, raw=str(raw))
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+async def _read_forward_priors(
+    source: OpportunityPriorSource,
+    entity_id: str,
+    keys: Sequence[tuple[int, int]],
+    now: datetime,
+) -> tuple[list[SlotPrior], float | None]:
+    """`(slot priors in `keys` order, learner native age in days)`.
+
+    HOW LEARNER AGE IS ESTABLISHED, AND WHY IT IS DERIVED RATHER THAN STORED:
+    the age gate exists to stop `opportunity()` reporting "good" before the
+    learner has accumulated real (non-backfilled) history. The obvious
+    implementation — a Redis "learning started at" key — restarts the 14-day
+    soak clock on any Redis flush and can be trivially wrong after a restore. So
+    the age is measured from the DATA instead: the oldest NATIVE observation
+    anywhere in the consulted set. That number cannot be reset by losing a cache,
+    cannot be seeded by the backfill (which writes `src="backfill"`), and is
+    exactly the quantity `opportunity_min_learn_days` is specified against.
+
+    Returns 0.0 — NOT None — when no native observation exists anywhere.
+    `opportunity()` SKIPS the age check on None and enforces it on a float, so
+    None here would silently disable the very gate this function computes. 0.0
+    is "the learner is brand new", which is both true and fail-open.
+    """
+    priors: list[SlotPrior] = []
+    oldest_native: datetime | None = None
+
+    for day_of_week, slot in keys:
+        observations = await source.read_observations(entity_id, day_of_week, slot)
+        priors.append(source.build_prior(entity_id, day_of_week, slot, observations))
+        for obs in observations:
+            if obs.src != "native":
+                continue
+            if oldest_native is None or obs.at < oldest_native:
+                oldest_native = obs.at
+
+    if oldest_native is None:
+        return priors, 0.0
+    # Measured against the TICK clock, not `datetime.now()`. A second clock here
+    # would make the 14-day learner gate drift from every other time comparison
+    # in the rule.
+    age_days = (_as_utc(now) - _as_utc(oldest_native)).total_seconds() / 86400.0
+    return priors, max(0.0, age_days)
+
+
+async def _bump_defer_streak(redis_client: aioredis.Redis, zone_id: int) -> int:
+    """Increment the consecutive-`better_window` counter. Returns it, 0 on failure.
+
+    A failure to record the instrument must never fail the tick — the counter is
+    evidence for a future decision, not a gate on the current one.
+    """
+    key = _OPPORTUNITY_DEFER_STREAK_KEY.format(zone_id=zone_id)
+    try:
+        streak = int(await redis_client.incr(key))
+        await redis_client.expire(key, _OPPORTUNITY_DEFER_STREAK_TTL_S)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("opportunity_defer_streak_bump_failed", zone_id=zone_id, error=str(exc))
+        return 0
+    return streak
+
+
+async def _reset_defer_streak(redis_client: aioredis.Redis, zone_id: int) -> None:
+    """Clear the streak because THIS tick's verdict was not `better_window`.
+
+    ⚠ THIS IS WHY THE COUNTER IS USABLE DURING THE SHADOW SOAK, AND IT IS A
+    DELIBERATE READING OF §4.4's "cleared on dispatch". Under A4 the two clear
+    conditions coincide: a non-`better_window` verdict is exactly the tick on
+    which the zone stops being deferred and dispatches. Under A3 they do NOT
+    coincide — every tick passes and dispatches, so clearing on dispatch alone
+    would pin the streak at 1 forever and the A4 soak table's "max streak >= 6"
+    red light could never illuminate. Clearing on the VERDICT instead measures
+    the counterfactual the soak is actually asking about: how many consecutive
+    ticks WOULD this zone have been deferred? `loop` still clears on dispatch as
+    well, but only for jobs that are actuating — see
+    `loop._clear_opportunity_zone_state` for the other half of this reasoning.
+    """
+    key = _OPPORTUNITY_DEFER_STREAK_KEY.format(zone_id=zone_id)
+    try:
+        await redis_client.delete(key)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("opportunity_defer_streak_reset_failed", zone_id=zone_id, error=str(exc))
+
+
+async def opportunity_check(
+    job: VacuumJob,
+    zone_id: int,
+    ctx: ContextSnapshot,
+    redis_client: aioredis.Redis,
+    opp_ctx: OpportunityContext | None = None,
+) -> tuple[str, str, str]:
+    """Comfort rule: is a materially better cleaning window arriving soon?
+
+    LOG-ONLY IN THIS PR. See the block comment above for the three structural
+    invariants, the fail-open matrix and why bundling needs no runtime guard.
+
+    Returns the standard `(result, gate_failed, reason)` triple. In A3 the result
+    is ALWAYS "PASS" — asserted by `test_shadow_mode_can_never_change_a_verdict`
+    across the full verdict cross-product — because `job.opportunity_actuate` is
+    False on every job. The reason string is where all the information goes.
+    """
+    if not job.opportunity_enabled:
+        return "PASS", "none", "opportunity_disabled"
+
+    if opp_ctx is None:
+        # Feature not wired in (a caller that predates A3, or a deployment with
+        # no prior store). Named, per invariant 3 — never a silent no-op.
+        return "PASS", "none", "opportunity_inert:no_prior_source"
+
+    zone_score = ctx.zone_scores.get(zone_id, 0.0)
+
+    # §5.5 belt-and-braces. Structurally unreachable — a below-threshold zone is
+    # deferred by R0 long before R1 — but if it ever became reachable, this zone
+    # would be a bundle passenger and shrinking a batch is a behaviour change
+    # nobody asked for.
+    if zone_score < job.dispatch_threshold:
+        return "PASS", "none", "opportunity_skipped:below_dispatch_threshold"
+
+    try:
+        return await _opportunity_verdict(job, zone_id, ctx, redis_client, opp_ctx, zone_score)
+    except Exception as exc:  # noqa: BLE001
+        # A comfort rule must not be able to take down a tick. `run_r1` is
+        # wrapped by `evaluate_zone`, but that wrapper converts an exception into
+        # a DEFER — so letting one escape would turn a bug in a log-only rule
+        # into a suppressed dispatch, which is exactly the authority this PR
+        # promises the rule does not have.
+        log.error(
+            "opportunity_check_error",
+            job_id=job.job_id,
+            zone_id=zone_id,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return "PASS", "none", f"opportunity_error:{type(exc).__name__}:{exc!s}"
+
+
+async def _opportunity_verdict(
+    job: VacuumJob,
+    zone_id: int,
+    ctx: ContextSnapshot,
+    redis_client: aioredis.Redis,
+    opp_ctx: OpportunityContext,
+    zone_score: float,
+) -> tuple[str, str, str]:
+    """The rule body. Split out so `opportunity_check` owns the blanket guard."""
+    cfg = opp_ctx.cfg
+    now = ctx.timestamp
+
+    # ── 1. Patience. Computed first — see "call order" in the block comment. ──
+    over_since = await _read_over_threshold_since(
+        redis_client, zone_id, zone_score, job.dispatch_threshold, now
+    )
+    patience_value = patience(
+        zone_score=zone_score, over_threshold_since=over_since, now=now, cfg=cfg
+    )
+    if patience_value == IMPATIENT:
+        band = patience_band(
+            zone_score=zone_score, over_threshold_since=over_since, now=now, cfg=cfg
+        )
+        # An impatient zone is not deferring, so its streak is over.
+        await _reset_defer_streak(redis_client, zone_id)
+        return "PASS", "none", f"opportunity_impatient:{band}"
+
+    # ── 2. Duration. Unavailable short-circuits the per-slot reads entirely. ──
+    duration = duration_estimate(
+        cfg=cfg,
+        zone_stats=opp_ctx.zone_stats.get(zone_id),
+        robot_stats=opp_ctx.robot_stats.get(job.robot),
+        zone_count=1,
+    )
+
+    lookahead = lookahead_slot_count(
+        patience_value=patience_value, cfg=cfg, slot_minutes=opp_ctx.slot_minutes
+    )
+
+    # ── 3. Forward priors. Skipped when there is nothing to fit against. ──
+    slots: list[SlotPrior] = []
+    learner_days: float | None = None
+    if duration.minutes is not None:
+        needed = required_slot_count(
+            duration_min=duration.minutes,
+            lookahead_slots=lookahead,
+            slot_minutes=opp_ctx.slot_minutes,
+        )
+        keys = forward_slot_keys(
+            now=now, count=needed, slot_minutes=opp_ctx.slot_minutes, tz=opp_ctx.tz
+        )
+        slots, learner_days = await _read_forward_priors(
+            opp_ctx.prior_source, opp_ctx.prior_entity_id, keys, now
+        )
+
+    # ── 4. The pure read. Every remaining fail-open case is decided in here. ──
+    opp = opportunity(
+        now=now,
+        slots=slots,
+        duration=duration,
+        cfg=cfg,
+        patience_value=patience_value,
+        learner_native_days=learner_days,
+        context_degraded=ctx.degraded,
+        slot_minutes=opp_ctx.slot_minutes,
+        tz=opp_ctx.tz,
+    )
+
+    # Recorded BEFORE the confidence branch: an unavailable read is exactly the
+    # thing L1 most needs to be told about, and dropping it here would recreate
+    # the invisible-degradation bug one layer up in the prompt.
+    opp_ctx.record(zone_id, opp)
+
+    if opp.confidence == CONFIDENCE_UNAVAILABLE:
+        await _reset_defer_streak(redis_client, zone_id)
+        # `degraded_reason` is never None when confidence != "good" — A2 treats
+        # an unnamed degradation as a bug — but the fallback keeps invariant 3
+        # true by construction rather than by trusting another module.
+        return (
+            "PASS",
+            "none",
+            f"opportunity_unavailable:{opp.degraded_reason or 'unspecified'}",
+        )
+
+    # ── 5. Verdict (spec §4.4). ──
+    verdict = VERDICT_FIT_OK
+    if (
+        opp.best_slot_gain >= cfg.opportunity_strong_gain
+        and opp.expected_fit_now <= cfg.opportunity_weak_fit
+        and opp.confidence == CONFIDENCE_GOOD
+    ):
+        # "good" is load-bearing here and nowhere else: a `thin` read may inform
+        # L1 but may never, on its own, withhold a dispatch.
+        verdict = VERDICT_BETTER_WINDOW
+    elif opp.expected_fit_now <= cfg.opportunity_marginal_fit:
+        verdict = VERDICT_FIT_MARGINAL
+
+    # ── 6. The instrument. Updated on EVERY tick, including in shadow mode —
+    # that is the entire point of shipping the counter with A3 rather than A4. ──
+    if verdict == VERDICT_BETTER_WINDOW:
+        streak = await _bump_defer_streak(redis_client, zone_id)
+    else:
+        await _reset_defer_streak(redis_client, zone_id)
+        streak = 0
+
+    detail = f"{format_opportunity(opp)} streak={streak}"
+
+    # ── 7. LOG-ONLY GATE. Nothing below this line runs in PR A3. ──
+    if not job.opportunity_actuate:
+        return "PASS", "none", f"opportunity_shadow:{verdict}:{detail}"
+
+    if opp.confidence != CONFIDENCE_GOOD:
+        # A THIN read may inform, but may not act — not even by escalating.
+        #
+        # `better_window` already requires "good", so only `fit_marginal` could
+        # reach the actuating path on a thin read, and it would escalate to L1.
+        # Spec §4.4's fail-open matrix lists "prior store cold (native_count <
+        # opportunity_min_slot_samples on any consulted slot)" as a PASS case,
+        # full stop — and an AMBIGUOUS is not a PASS. It routes to an LLM that
+        # will be shown a forecast built on one or two observations and asked to
+        # weigh it, which is how a thin prior acquires more authority than the
+        # evidence behind it. Declining outright is what the spec asked for and
+        # is strictly the safer of the two readings.
+        return "PASS", "none", f"opportunity_thin:{verdict}:{detail}"
+
+    if verdict == VERDICT_BETTER_WINDOW:
+        offset_min = (opp.best_slot_offset or 0) * opp.slot_minutes
+        return "FAIL", "comfort", f"better_window_in_{offset_min}m:{detail}"
+    if verdict == VERDICT_FIT_MARGINAL:
+        return "AMBIGUOUS", "comfort", f"fit_marginal:{detail}"
+    return "PASS", "none", f"fit_ok:{detail}"
+
+
 # ── Occupancy-gate override helpers (spec §6.4, §6.5) ────────────────────────
 
 
@@ -600,6 +1171,7 @@ async def run_r1(
     zone_meta: ZoneMeta | None = None,
     bypass_mode: str = "none",
     bypass_reason_str: str | None = None,
+    opp_ctx: OpportunityContext | None = None,
 ) -> tuple[str, str, str]:
     """Run the full R1 tier for one (job, zone) pair.
 
@@ -617,6 +1189,28 @@ async def run_r1(
       4. Transit lookahead — ALWAYS runs (not an occupancy gate)
       5. Comfort rules (AMBIGUOUS / PASS-marginal → L1 if job.l1_required or AMBIGUOUS)
          — ALWAYS runs (not an occupancy gate)
+           5a. noise_budget_check
+           5b. noise_radius_check
+           5c. opportunity_check (PR A3) — predictive patience, LOG-ONLY
+
+    ⚠ THE ORDER OF STEPS 3 AND 5 IS A SAFETY PROPERTY, NOT A STYLE CHOICE.
+    Every effectiveness rule in step 3 exits this function with a bare `return`
+    on FAIL. That is what makes it structurally impossible for ANY comfort rule
+    — including `opportunity_check`, which reasons about PREDICTED occupancy —
+    to run when MEASURED occupancy has already said no, and therefore impossible
+    for a degraded prior store to weaken the gate hardened after the 2026-08-31
+    incident. `test_opportunity_never_precedes_effectiveness_gate` pins this
+    ordering. Do not convert those short-circuits into collected results, and do
+    not move `opportunity_check` above them.
+
+    `opp_ctx` carries the live dependencies `opportunity_check` needs (prior
+    store, config, mission-duration stats). It is optional: `None` means the
+    predictive-patience feature is not wired in, and the rule returns PASS with
+    `opportunity_inert` rather than silently not running. Every pre-A3 caller
+    therefore keeps working: its `result` and `gate_failed` are unchanged.
+    The `reason` string is NOT — on an enabled job it gains an
+    `|opportunity_inert:no_prior_source` suffix, by design (invariant 3: name
+    the inert path, never no-op silently). See `OpportunityContext`.
 
     Returns (result, gate_failed, reason):
       result ∈ {"PASS", "FAIL", "AMBIGUOUS"}
@@ -739,21 +1333,42 @@ async def run_r1(
     nb_result, nb_gate, nb_reason = noise_budget_check(job, zone_id, ctx)
     nr_result, nr_gate, nr_reason = noise_radius_check(job, zone_id, ctx)
 
+    # opportunity_check (PR A3) runs AFTER the two noise rules, per spec §4.4.
+    # Its placement last in the comfort block is deliberate: it is the only rule
+    # here that performs I/O, so a zone already hard-failing on noise should not
+    # pay for a database read to be told something that cannot change the answer.
+    op_result, op_gate, op_reason = await opportunity_check(
+        job, zone_id, ctx, redis_client, opp_ctx
+    )
+
     # Any hard comfort FAIL → defer
     if nb_result == "FAIL":
         return "FAIL", nb_gate, nb_reason
     if nr_result == "FAIL":
         return "FAIL", nr_gate, nr_reason
+    if op_result == "FAIL":
+        # Unreachable while `opportunity_actuate` is False on every job (PR A3);
+        # live from PR A4. Present now so the actuation flip is genuinely the
+        # one-line config change it is advertised as, and so the A4 path is
+        # exercised by tests before it is exercised by the house.
+        return "FAIL", op_gate, op_reason
 
     # Any AMBIGUOUS comfort result → escalate to L1
     if nb_result == "AMBIGUOUS" or nr_result == "AMBIGUOUS":
         ambiguous_reason = nb_reason if nb_result == "AMBIGUOUS" else nr_reason
         return "AMBIGUOUS", "comfort", ambiguous_reason
+    if op_result == "AMBIGUOUS":
+        return "AMBIGUOUS", "comfort", op_reason
 
-    # All pass — append bypass tag to reason for observability (spec §6.8)
+    # All pass — append bypass tag to reason for observability (spec §6.8).
+    # The opportunity reason rides along on the PASS: in LOG-ONLY mode it is the
+    # ONLY place the shadow verdict reaches the decision log, and the A4 soak
+    # reads it out of exactly this field via get_vacuum_decisions().
     pass_reason = "all_rules_pass"
     if bypass_mode != "none" and bypass_reason_str:
         pass_reason = f"all_rules_pass|occ_bypass:{bypass_reason_str}"
+    if op_reason != "opportunity_disabled":
+        pass_reason = f"{pass_reason}|{op_reason}"
     return "PASS", "none", pass_reason
 
 

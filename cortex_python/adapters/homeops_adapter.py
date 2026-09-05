@@ -16,6 +16,7 @@ Spec: C:/Jarvis/Team/TARS/cortex_vacuumops_module_spec.md §11
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 import httpx
 import structlog
@@ -263,6 +264,59 @@ class HomeOpsAdapter:
                 zones[meta.contained_by].child_zones.append(meta.zone_id)
 
         return zones
+
+    async def get_mission_stats(
+        self, robot_id: int, zone_id: int | None = None
+    ) -> dict[str, Any] | None:
+        """Aggregate mission-duration stats for a robot, optionally zone-scoped.
+
+        GET /api/vacuum/missions/log/stats?robot_id=<id>[&zone_id=<id>]
+
+        Feeds `opportunity.duration_estimate()` (PR A2/A3): how many minutes to
+        reserve for a mission when asking whether it fits in the next clear
+        window. The fields that matter are `p75_active_duration_min` /
+        `p90_active_duration_min` / `avg_active_duration_min`, shipped by A0
+        (homeOps#206).
+
+        ⚠ THE ACTIVE FIELDS, NEVER THE WALL-CLOCK ONES. `avg_duration_min`
+        measures dispatch → mission-log close-out, including the return leg and
+        a Roborock's double dock-bounce — on the Saros it reads 44.8 min against
+        an actual 26.3 min of cleaning. Sizing a fit window off it would reserve
+        ~70% more than a mission needs and turn every fit check into a deferral.
+        The whole payload is returned here rather than a picked field, but
+        `opportunity._read_active_minutes()` enforces the distinction
+        structurally with a field whitelist — do not "helpfully" normalise a
+        wall-clock figure into an active one on the way through.
+
+        Returns None on any failure or a malformed payload. NOT an empty dict:
+        `duration_estimate()` treats an absent payload as "no usable duration"
+        and degrades the opportunity read to `unavailable`, which fails OPEN to
+        current behaviour. An empty dict would travel the same path, but None
+        says "we never got an answer" rather than "the robot has no history",
+        and those are different facts in the decision log.
+        """
+        params: dict[str, int] = {"robot_id": robot_id}
+        if zone_id is not None:
+            params["zone_id"] = zone_id
+        try:
+            async with self._client() as client:
+                r = await client.get("/api/vacuum/missions/log/stats", params=params)
+                r.raise_for_status()
+                payload = r.json()
+        except Exception as exc:
+            log.warning(
+                "homeops_get_mission_stats_failed",
+                robot_id=robot_id,
+                zone_id=zone_id,
+                error=str(exc),
+            )
+            return None
+
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            log.warning("homeops_get_mission_stats_malformed", robot_id=robot_id, zone_id=zone_id)
+            return None
+        return data
 
     async def trigger_vacuum(
         self,

@@ -105,6 +105,28 @@ class VacuumJob:
     mop_deep_after_days: float = 14.0
     # Intensity arm: a zone overdue by this much gets a deep mop rather than light.
 
+    # ── Predictive patience / opportunity gate (r1.opportunity_check) ────────
+    # Spec §4.4 (PR A3) + §7. TWO flags, not one, and that is what buys a free
+    # soak: the computation and the actuation are switched independently, so the
+    # rule can log a real verdict into every decision row for two weeks without
+    # being able to change a single dispatch. Same shape as the mop-cadence gate
+    # Carlos already ran in shadow mode.
+    opportunity_enabled: bool = False
+    # Turns the COMPUTATION on. Consults the A1 learner, forms a verdict, writes
+    # the chained-deferral counter, logs the read. Still cannot defer anything.
+    # True on Saros1FRoomsJob ONLY at A3 — it is the one job with usable mission
+    # durations and priors worth forecasting (design memo §5.3, §5.4).
+    opportunity_actuate: bool = False
+    # Turns the VERDICT on — lets a better_window become a comfort FAIL and a
+    # fit_marginal an AMBIGUOUS.
+    #
+    # ⛔ DO NOT FLIP THIS. It is PR A4's entire content. It is a behaviour change
+    # to the live dispatch path and is gated on BOTH a >=14-day soak against the
+    # four-signal table in spec §4.5 (better_window rate 5-25%, max defer streak
+    # <=3, unavailable rate <10%) AND Carlos's explicit go-ahead. Flipping it
+    # early does not "test it sooner" — it spends the evidence the soak exists to
+    # collect.
+
 
 @dataclass
 class Ethan3FLitterBoxJob(VacuumJob):
@@ -256,6 +278,17 @@ class Saros1FRoomsJob(VacuumJob):
     occupancy_clear_grace_s: int = 120
     robot: str = "saros"
     door_check: bool = True
+    # The ONLY job running the predictive-patience rule, and only in shadow (A3).
+    # Why this one and no other (design memo §5.3-§5.4): it is the only job with
+    # a usable mission duration — `get_vacuum_mission_stats` returns
+    # avg_duration_min 0 for Sam and 2 logged missions for the Saros litter box,
+    # and the fit check IS the mechanism, so without a duration it degenerates
+    # into "is this hour usually busy", which is weaker than the current-state
+    # gate it would sit beside. Ethan's 3F litter box additionally has
+    # effectiveness_scope="none" — layering PREDICTED occupancy onto a job that
+    # deliberately ignores ACTUAL occupancy would reintroduce through the back
+    # door exactly the constraint that scope was chosen to remove.
+    opportunity_enabled: bool = True
     mop_enabled: bool = True
     mop_cadence_days: float = 7.0
     mop_score_threshold: float = 80.0

@@ -31,7 +31,8 @@ from pydantic import BaseModel, Field
 from cortex_python.config.settings import Settings
 from cortex_python.modules.vacuumops.jobs import VacuumJob
 from cortex_python.modules.vacuumops.noise import noise_budget, noise_impact
-from cortex_python.modules.vacuumops.schemas import ContextSnapshot, ZoneMeta
+from cortex_python.modules.vacuumops.opportunity import format_opportunity
+from cortex_python.modules.vacuumops.schemas import ContextSnapshot, OpportunityRead, ZoneMeta
 
 log = structlog.get_logger()
 
@@ -111,6 +112,7 @@ def _build_context_hash(
     ctx: ContextSnapshot,
     bypassed_for_zone: bool = False,
     reason_for_zone: str | None = None,
+    opportunity_read: OpportunityRead | None = None,
 ) -> str:
     """Build a deterministic cache key from the context subset the prompt uses.
 
@@ -174,6 +176,24 @@ def _build_context_hash(
             "bypass": bypassed_for_zone,
             "reason": reason_for_zone,
         },
+        # Predictive-patience read (PR A3). MUST be here: the prompt renders it,
+        # and this hash's stated contract is "only the fields the prompt uses" —
+        # which cuts both ways. A prompt input missing from the subset means two
+        # ticks with materially different opportunity reads collide on one cache
+        # key, and the second silently reuses the first's L1 answer for up to
+        # 600s. Rounded, because the cache should be busted by a real change in
+        # the forecast, not by float noise in the third decimal.
+        "opportunity": (
+            None
+            if opportunity_read is None
+            else {
+                "fit_now": round(opportunity_read.expected_fit_now, 2),
+                "best_offset": opportunity_read.best_slot_offset,
+                "best_gain": round(opportunity_read.best_slot_gain, 2),
+                "confidence": opportunity_read.confidence,
+                "degraded": opportunity_read.degraded_reason,
+            }
+        ),
     }
     canonical = json.dumps(subset, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()[:32]
@@ -188,10 +208,16 @@ def _render_prompt(
     patterns_block: str,
     bypassed_for_zone: bool = False,
     reason_for_zone: str | None = None,
+    opportunity_read: OpportunityRead | None = None,
 ) -> str:
     """Render the Jinja2 prompt template for L1.
 
     Uses Jinja2 Environment to render {{ }} placeholders from the spec.
+
+    ⚠ `env` uses StrictUndefined: every `{{ }}` in every one of the five
+    templates must be supplied here or rendering raises (and degrades the whole
+    decision to a defer). A new variable must therefore be added to ALL of the
+    prompt files or to none of them — never to just one.
     """
     # Build PST timestamp string (Carlos uses PST year-round)
     import pytz  # type: ignore[import]
@@ -292,6 +318,15 @@ def _render_prompt(
         home_empty=ctx.home_empty,
         occupancy_gate_bypassed=bypassed_for_zone,
         bypass_reason=reason_for_zone or "none",
+        # Predictive-patience read (PR A3, spec §4.4). Rendered through A2's own
+        # `format_opportunity()` rather than a formatter written here, so the
+        # field set L1 is shown stays identical to the one the decision log
+        # records and cannot drift from the maths that produced it.
+        opportunity_read=(
+            format_opportunity(opportunity_read)
+            if opportunity_read is not None
+            else "not evaluated for this zone"
+        ),
     )
     return rendered
 
@@ -308,6 +343,7 @@ async def run_l1(
     patterns_block: str,
     bypassed_for_zone: bool = False,
     reason_for_zone: str | None = None,
+    opportunity_read: OpportunityRead | None = None,
 ) -> L1Decision:
     """Run the L1 LLM disambiguation call for one (job, zone) pair.
 
@@ -332,6 +368,7 @@ async def run_l1(
         ctx,
         bypassed_for_zone=bypassed_for_zone,
         reason_for_zone=reason_for_zone,
+        opportunity_read=opportunity_read,
     )
     cache_key = _L1_CACHE_KEY.format(context_hash=context_hash)
 
@@ -355,6 +392,7 @@ async def run_l1(
             patterns_block,
             bypassed_for_zone=bypassed_for_zone,
             reason_for_zone=reason_for_zone,
+            opportunity_read=opportunity_read,
         )
     except Exception as exc:
         log.error("l1_prompt_render_failed", job_id=job.job_id, zone_id=zone_id, error=str(exc))
