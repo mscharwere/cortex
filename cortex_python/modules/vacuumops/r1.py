@@ -719,8 +719,17 @@ class OpportunityContext:
 
     `None` for the whole object means the feature is not wired in. That is a
     supported state, not an error: it returns PASS with `opportunity_inert`,
-    which keeps every pre-A3 caller (and every existing test) working unchanged
-    while still NAMING itself in the log per invariant 3.
+    which keeps every pre-A3 caller (and every existing test) working — the
+    RESULT and the GATE are unchanged, which is everything that can reach a
+    robot.
+
+    ⚠ "UNCHANGED" DOES NOT MEAN THE REASON STRING IS BYTE-FOR-BYTE IDENTICAL.
+    On an opportunity-enabled job the inert path APPENDS
+    `|opportunity_inert:no_prior_source` to the decision-log reason. That is
+    invariant 3 deliberately at work — every degraded or inert path must NAME
+    itself, because a silent no-op is the exact shape of the 2026-08-31 root
+    cause. Pinned by
+    `test_run_r1_result_and_gate_are_unchanged_when_no_context_is_supplied`.
     """
 
     prior_source: OpportunityPriorSource
@@ -1198,7 +1207,10 @@ async def run_r1(
     store, config, mission-duration stats). It is optional: `None` means the
     predictive-patience feature is not wired in, and the rule returns PASS with
     `opportunity_inert` rather than silently not running. Every pre-A3 caller
-    therefore keeps working unchanged.
+    therefore keeps working: its `result` and `gate_failed` are unchanged.
+    The `reason` string is NOT — on an enabled job it gains an
+    `|opportunity_inert:no_prior_source` suffix, by design (invariant 3: name
+    the inert path, never no-op silently). See `OpportunityContext`.
 
     Returns (result, gate_failed, reason):
       result ∈ {"PASS", "FAIL", "AMBIGUOUS"}

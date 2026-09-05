@@ -55,6 +55,7 @@ from cortex_python.modules.vacuumops.r1 import (
     VERDICT_FIT_MARGINAL,
     VERDICT_FIT_OK,
     OpportunityContext,
+    _read_over_threshold_since,
     opportunity_check,
     run_r1,
 )
@@ -650,6 +651,65 @@ class TestStarvationClock:
         assert result == "PASS"
         assert reason == "opportunity_impatient:impatient:score"
 
+    @pytest.mark.parametrize("falsy", [None, "", b""])
+    @pytest.mark.asyncio
+    async def test_absent_clock_key_resolves_to_none_not_a_timestamp(self, falsy: Any) -> None:
+        """The `if not raw` branch: GET came back FALSY without raising.
+
+        Distinct from `test_unreadable_clock_resolves_to_impatient_not_patient`,
+        which covers the Redis-EXCEPTION path. This is the other way the read can
+        fail to produce a clock: the round trip succeeded and the key is simply
+        not there (or is empty). Today the caller filters `zone_score <
+        dispatch_threshold` before this runs and the reachable path always
+        SETNX-then-GETs, so a real Redis will not answer falsy here — but
+        "unreachable, trust me" is not a test, and if a future refactor makes it
+        reachable the branch must still resolve to None. `None` is the safe
+        direction: it means IMPATIENT, so the rule goes inert rather than
+        inventing "now" and making the zone infinitely patient.
+
+        Exercised directly rather than through `opportunity_check`, because
+        reaching it through the rule would require the very caller-side filter
+        this branch exists to survive the removal of.
+        """
+
+        class FalsyGetRedis(FakeRedis):
+            """SETNX reports success; GET still answers falsy."""
+
+            async def get(self, key: str) -> Any:
+                self._guard("get")
+                return falsy
+
+        redis = FalsyGetRedis()
+        out = await _read_over_threshold_since(
+            redis,  # type: ignore[arg-type]
+            ZONE,
+            zone_score=70.0,
+            dispatch_threshold=60.0,
+            now=NOW,
+        )
+        assert out is None
+        # The SETNX did happen — this is the falsy-GET branch, not a no-write path.
+        assert over_threshold_since_key(ZONE) in redis.data
+
+    @pytest.mark.asyncio
+    async def test_a_none_clock_makes_patience_impatient(self) -> None:
+        """Pins the consequence of the branch above: None ⇒ IMPATIENT ⇒ inert.
+
+        Without this, `_read_over_threshold_since` returning None would be an
+        untethered fact. `patience()` is what turns it into the safe outcome.
+        """
+        from cortex_python.modules.vacuumops.opportunity import IMPATIENT, patience
+
+        assert (
+            patience(
+                zone_score=70.0,
+                over_threshold_since=None,
+                now=NOW,
+                cfg=VacuumOpsConfig(),
+            )
+            == IMPATIENT
+        )
+
     @pytest.mark.asyncio
     async def test_impatient_zone_does_no_prior_reads(self) -> None:
         """Patience is evaluated first, so an inert zone costs no database I/O."""
@@ -809,8 +869,23 @@ class TestShadowMode:
             assert token in reason, f"{token} missing from decision-log reason: {reason}"
 
     @pytest.mark.asyncio
-    async def test_run_r1_is_unchanged_when_no_context_is_supplied(self) -> None:
-        """Every pre-A3 caller keeps working, and says so in the log."""
+    async def test_run_r1_result_and_gate_are_unchanged_when_no_context_is_supplied(self) -> None:
+        """Every pre-A3 caller keeps working, and says so in the log.
+
+        ⚠ "UNCHANGED" HERE MEANS RESULT/GATE-UNCHANGED, NOT STRING-IDENTICAL.
+        `opp_ctx=None` deliberately APPENDS `|opportunity_inert:no_prior_source`
+        to the reason on an enabled job, so the decision-log string is NOT
+        byte-for-byte what a pre-A3 build emitted. That is invariant 3 working as
+        designed: an inert path must NAME itself rather than silently no-op,
+        because a silent no-op is the exact shape of the 2026-08-31 root cause.
+
+        What is guaranteed unchanged is everything that can affect a robot:
+        the `result` and the `gate` — asserted below. A caller that pattern-
+        matches the reason string on equality rather than containment is the one
+        thing that would notice, and no such caller exists (the disabled-job case
+        is covered by `test_a_disabled_job_adds_no_noise_to_the_reason`, where
+        the string IS bare `all_rules_pass`).
+        """
         result, gate, reason = await run_r1(Saros1FRoomsJob(), ZONE, make_ctx(), FakeRedis(), [])
         assert (result, gate) == ("PASS", "none")
         assert "opportunity_inert:no_prior_source" in reason
@@ -1007,3 +1082,121 @@ class TestMissionStatsWiring:
         assert out is not None
         assert out.zone_stats == {}
         assert out.robot_stats == {}
+
+
+# ── Mission-stats TTL cache ───────────────────────────────────────────────────
+
+
+class TestMissionStatsCache:
+    """`loop._fetch_mission_stats`'s TTL, exercised across the boundary.
+
+    Tested directly rather than through `build_opportunity_context`, for two
+    reasons. First, the cache is the thing under test and the builder only
+    reaches it once per (robot, zone) per call, so a repeat-call assertion has to
+    drive the function itself. Second, the builder resolves `unit_id` from
+    `ctx.zone_metadata`, which the shared snapshot fixture leaves empty — so the
+    wiring tests above never enter the fetch path at all and could not have
+    caught a broken TTL.
+
+    No sleeping and no clock patching: `_fetch_mission_stats` already takes
+    `now_monotonic` as a parameter, so the TTL boundary is crossed by passing a
+    later number. That is also why the loop passes one value for a whole tick —
+    every zone in a tick shares the tick's clock reading.
+    """
+
+    ROBOT = 90_001  # Not a real vac_units id; keeps this test's cache keys its own.
+
+    @pytest.fixture(autouse=True)
+    def _isolate_cache(self) -> Any:
+        """The cache is module-level state, so it outlives a test unless cleared.
+
+        Cleared on the way IN and on the way OUT: in, so a prior test cannot seed
+        a hit; out, so these entries cannot leak into one.
+        """
+        from cortex_python.modules.vacuumops.loop import _mission_stats_cache
+
+        _mission_stats_cache.clear()
+        yield
+        _mission_stats_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_second_call_inside_the_ttl_does_not_re_query(self) -> None:
+        from cortex_python.modules.vacuumops.loop import (
+            _MISSION_STATS_TTL_S,
+            _fetch_mission_stats,
+        )
+
+        adapter = AsyncMock()
+        adapter.get_mission_stats = AsyncMock(return_value=dict(GOOD_STATS))
+
+        first = await _fetch_mission_stats(adapter, self.ROBOT, None, 1_000.0)
+        second = await _fetch_mission_stats(
+            adapter, self.ROBOT, None, 1_000.0 + _MISSION_STATS_TTL_S - 1.0
+        )
+
+        assert adapter.get_mission_stats.await_count == 1, "TTL did not serve a cache hit"
+        assert first == second == GOOD_STATS
+
+    @pytest.mark.asyncio
+    async def test_a_call_past_the_ttl_re_queries(self) -> None:
+        from cortex_python.modules.vacuumops.loop import (
+            _MISSION_STATS_TTL_S,
+            _fetch_mission_stats,
+        )
+
+        adapter = AsyncMock()
+        adapter.get_mission_stats = AsyncMock(return_value=dict(GOOD_STATS))
+
+        await _fetch_mission_stats(adapter, self.ROBOT, None, 1_000.0)
+        await _fetch_mission_stats(adapter, self.ROBOT, None, 1_000.0 + _MISSION_STATS_TTL_S + 1.0)
+
+        assert adapter.get_mission_stats.await_count == 2, "expired entry was served stale"
+
+    @pytest.mark.asyncio
+    async def test_the_refreshed_value_is_the_new_one(self) -> None:
+        """An expiry that re-queried but kept serving the old payload is worse
+        than no cache — it would look correct in a call-count assertion alone."""
+        from cortex_python.modules.vacuumops.loop import (
+            _MISSION_STATS_TTL_S,
+            _fetch_mission_stats,
+        )
+
+        moved: dict[str, Any] = {"p75_active_duration_min": 41.0}
+        adapter = AsyncMock()
+        adapter.get_mission_stats = AsyncMock(side_effect=[dict(GOOD_STATS), dict(moved)])
+
+        before = await _fetch_mission_stats(adapter, self.ROBOT, None, 1_000.0)
+        after = await _fetch_mission_stats(
+            adapter, self.ROBOT, None, 1_000.0 + _MISSION_STATS_TTL_S + 1.0
+        )
+
+        assert before == GOOD_STATS
+        assert after == moved
+
+    @pytest.mark.asyncio
+    async def test_zone_and_robot_reads_are_cached_separately(self) -> None:
+        """`(robot_id, zone_id)` is the key. A robot-wide read must not satisfy a
+        per-zone one — `duration_estimate()` chooses between them on zone_count,
+        so collapsing the two would feed a batch estimate to a single zone."""
+        from cortex_python.modules.vacuumops.loop import _fetch_mission_stats
+
+        adapter = AsyncMock()
+        adapter.get_mission_stats = AsyncMock(return_value=dict(GOOD_STATS))
+
+        await _fetch_mission_stats(adapter, self.ROBOT, None, 1_000.0)
+        await _fetch_mission_stats(adapter, self.ROBOT, ZONE, 1_000.0)
+
+        assert adapter.get_mission_stats.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_none_result_is_cached_too(self) -> None:
+        """Documented intent: a robot with no logged missions (Sam, design memo
+        §5.3) must not be re-queried every tick to be told the same nothing."""
+        from cortex_python.modules.vacuumops.loop import _fetch_mission_stats
+
+        adapter = AsyncMock()
+        adapter.get_mission_stats = AsyncMock(side_effect=RuntimeError("homeops down"))
+
+        assert await _fetch_mission_stats(adapter, self.ROBOT, None, 1_000.0) is None
+        assert await _fetch_mission_stats(adapter, self.ROBOT, None, 1_100.0) is None
+        assert adapter.get_mission_stats.await_count == 1

@@ -1203,10 +1203,13 @@ async def vacuumops_loop(settings: Settings) -> None:
     # Module config — dry-run sourced from settings
     vacuumops_cfg = build_vacuumops_config(settings)
 
-    # Occupancy prior learner (spec §4.2 / PR A1). Writes cortex_occupancy_priors;
-    # nothing reads it until PR A2's opportunity() lands, so this changes no
-    # dispatch decision. It ships first because its sample clock is wall-clock
-    # bound and everything else in the train is engineering time.
+    # Occupancy prior learner (spec §4.2 / PR A1). Writes cortex_occupancy_priors.
+    # As of A3 this store IS read on the live path: `build_opportunity_context`
+    # hands it to `run_r1` as `opp_ctx.prior_source`, where `opportunity_check`
+    # consults it. That rule is still LOG-ONLY (`opportunity_actuate=False` on
+    # every job), so it changes no dispatch decision yet — A4 is the actuation
+    # flip. It shipped first because its sample clock is wall-clock bound and
+    # everything else in the train is engineering time.
     prior_store = PriorStore(
         db_session_factory,
         slot_minutes=vacuumops_cfg.prior_learner_slot_minutes,
