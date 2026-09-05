@@ -73,7 +73,7 @@ def _parse_ts(raw: object) -> datetime | None:
         return None
 
 
-def _bool_setting(data: dict, key: str) -> bool:
+def _bool_setting(data: dict[str, Any], key: str) -> bool:
     """Read one kill switch out of the settings payload. Fail-CLOSED.
 
     ONLY a literal `True` is True. A missing key (HomeOps predates the column),
