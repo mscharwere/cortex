@@ -102,6 +102,18 @@ class VacuumJob:
     # Score arm: a zone this dirty earns a wet pass regardless of the schedule.
     # Deliberately well above dispatch_threshold (50) — a routine vacuum-eligible
     # zone should not trigger a mop on score alone.
+    mop_score_cooldown_days: float = 1.0
+    # Score-arm cooldown: the minimum days since last_mopped_at before the SCORE
+    # arm may fire again. Days (not hours) to stay consistent with days_since()
+    # and the other three mop fields.
+    #
+    # Why this exists: the score arm and the schedule arm are independent `if`s
+    # with no time coupling. A zone with a high decay rate re-saturates its
+    # dirtiness score to a clamped 100 within hours of an ordinary cooking or
+    # meal signal (measured live: Kitchen 20/day, Prep Area 50/day, Dining
+    # Table 18/day), so without this floor the score arm can re-trigger a wet
+    # pass on the same day the zone was mopped — repeatedly. The schedule arm's
+    # 7-day floor is deliberately NOT affected by this field.
     mop_deep_after_days: float = 14.0
     # Intensity arm: a zone overdue by this much gets a deep mop rather than light.
 
@@ -305,6 +317,7 @@ class Saros1FRoomsJob(VacuumJob):
     mop_enabled: bool = True
     mop_cadence_days: float = 7.0
     mop_score_threshold: float = 80.0
+    mop_score_cooldown_days: float = 1.0
     mop_deep_after_days: float = 14.0
     zones: list[int] = field(
         default_factory=lambda: [19, 20, 21, 22, 24, 25]

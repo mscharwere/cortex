@@ -254,6 +254,117 @@ class TestEvaluateMopNeed:
         need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
         assert need.needed is False
 
+    # ── arm 3: same-day score cooldown ──
+    #
+    # The score arm and the schedule arm are independent `if`s with no time
+    # coupling. Kitchen / Prep Area / Dining Table decay at 20 / 50 / 18 per
+    # day and re-saturate to a clamped 100 within hours of a cooking or meal
+    # signal, so on score alone they re-triggered a wet pass the same day they
+    # were mopped. mop_score_cooldown_days is the missing floor.
+
+    def test_score_arm_suppressed_inside_the_cooldown(self):
+        """Score is over threshold, but the zone was mopped hours ago."""
+        job = Saros1FRoomsJob()  # mop_score_cooldown_days = 1.0
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=0.3)], scores={_KITCHEN: 100.0}
+        )
+        need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
+        assert need.needed is False
+        assert need.arm is None
+        assert need.days_since_mopped == pytest.approx(0.3)
+
+    def test_cooldown_reason_is_distinct_from_not_due(self):
+        """The reason string is the whole audit trail for an unsupervised wet run.
+
+        "the gate wanted to mop and chose not to" must not be hidden behind the
+        generic not_due tail.
+        """
+        job = Saros1FRoomsJob()
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=0.5)], scores={_KITCHEN: 92.0}
+        )
+        need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
+        assert need.reason == "score_cooldown:0.5d"
+        assert not need.reason.startswith("not_due:")
+        # mop_reason is VARCHAR(64) in HomeOps.
+        assert len(need.reason) <= 64
+
+    def test_score_arm_fires_once_the_cooldown_has_elapsed(self):
+        job = Saros1FRoomsJob()
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=1.0)], scores={_KITCHEN: 100.0}
+        )
+        need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
+        assert need.needed is True
+        assert need.arm == "score"
+        assert need.reason == "score:100"
+
+    def test_cooldown_length_is_configurable(self):
+        job = dataclasses.replace(Saros1FRoomsJob(), mop_score_cooldown_days=3.0)
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=2.0)], scores={_KITCHEN: 95.0}
+        )
+        need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
+        assert need.needed is False
+        assert need.reason == "score_cooldown:2.0d"
+
+    def test_below_threshold_inside_cooldown_still_reads_not_due(self):
+        """The cooldown reason is reserved for a score that actually cleared."""
+        job = Saros1FRoomsJob()
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=0.4)], scores={_KITCHEN: 60.0}
+        )
+        need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
+        assert need.needed is False
+        assert need.reason == "not_due:0.4d"
+
+    def test_schedule_arm_is_unaffected_by_the_cooldown(self):
+        """The 7-day floor fires unconditionally, whatever the cooldown is set to."""
+        job = dataclasses.replace(Saros1FRoomsJob(), mop_score_cooldown_days=30.0)
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=7.5)], scores={_KITCHEN: 100.0}
+        )
+        need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
+        assert need.needed is True
+        assert need.arm == "schedule"
+        assert need.reason == "schedule:7.5d"
+
+    def test_never_mopped_is_unaffected_by_the_cooldown(self):
+        """elapsed is None cannot reach the score arm — arm 2 returns first."""
+        job = dataclasses.replace(Saros1FRoomsJob(), mop_score_cooldown_days=30.0)
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, never_mopped=True)], scores={_KITCHEN: 100.0}
+        )
+        need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
+        assert need.needed is True
+        assert need.arm == "schedule"
+        assert need.reason == "schedule:never_mopped"
+
+    def test_signal_arm_outranks_the_cooldown(self):
+        """An explicit request is unconditional; the cooldown does not apply to it."""
+        job = dataclasses.replace(Saros1FRoomsJob(), mop_score_cooldown_days=30.0)
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=0.1, mop_requested=True)],
+            scores={_KITCHEN: 100.0},
+        )
+        need = evaluate_mop_need(job, _KITCHEN, ctx, _NOW)
+        assert need.needed is True
+        assert need.arm == "signal"
+        assert need.reason == "signal:requested"
+
+    def test_cooldown_suppression_keeps_the_batch_dry(self):
+        """End to end: the only score-eligible zone is inside its cooldown."""
+        job = Saros1FRoomsJob()
+        ctx = ctx_with(
+            [make_meta(_KITCHEN, last_mopped_days_ago=0.2)], scores={_KITCHEN: 100.0}
+        )
+        d = resolve_batch_mop(
+            batch_of(_KITCHEN), ctx, job_map([_KITCHEN], job), enabled_cfg(), _NOW
+        )
+        assert d.mop is False
+        assert d.reason == "off:no_zone_due"
+        assert d.triggering_zones == []
+
     # ── deep vs light ──
     def test_deep_flag_set_when_far_past_cadence(self):
         job = Saros1FRoomsJob()  # mop_deep_after_days = 14

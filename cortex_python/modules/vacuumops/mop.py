@@ -46,6 +46,14 @@ which only affects which arm is *reported*, never whether the mop happens):
   score    — the zone's dirtiness score is at or above `mop_score_threshold`
              (default 80, well above the dispatch threshold of 50). A merely
              vacuum-eligible zone does not earn a wet pass on score alone.
+             Floored by `mop_score_cooldown_days` (default 1.0): a zone mopped
+             less than that ago cannot be re-mopped on score. Without it the
+             score arm has no time coupling to the schedule arm at all, and
+             high-decay zones (measured live: Kitchen 20/day, Prep Area 50/day,
+             Dining Table 18/day) re-saturate to a clamped 100 within hours of
+             a routine cooking or meal signal, re-triggering a wet pass the
+             same day. The cooldown applies to this arm ONLY — signal and
+             schedule are untouched.
 
 DEGRADED CONTEXT — three distinct "we don't know" cases, all fail closed
 ------------------------------------------------------------------------
@@ -216,8 +224,31 @@ def evaluate_mop_need(
             days_since_mopped=elapsed,
         )
 
-    # Arm 3 — score threshold.
+    # Arm 3 — score threshold, floored by a same-day cooldown.
+    #
+    # The score arm has no time coupling to the schedule arm — they are
+    # independent `if`s. Zones with a high decay rate re-saturate to a clamped
+    # 100 within hours of an ordinary cooking or meal signal (measured live:
+    # Kitchen 20/day, Prep Area 50/day, Dining Table 18/day), so on score alone
+    # a zone could be wet-mopped again hours after it was last mopped. The
+    # cooldown is the missing floor.
+    #
+    # `elapsed` is never None here — arm 2 returns on never-mopped — so this is
+    # a guard on the score branch, not a separate top-level check: precedence
+    # stays signal → schedule → score → not_due, and the schedule arm keeps
+    # firing unconditionally at cadence regardless of this field.
     if score >= job.mop_score_threshold:
+        if elapsed is not None and elapsed < job.mop_score_cooldown_days:
+            # Deliberately NOT falling through to the generic not_due tail: this
+            # reason string is the entire audit trail for an unsupervised
+            # wet-mopping decision, and "the gate wanted to mop and chose not
+            # to" must stay visible in the decision log.
+            return MopZoneNeed(
+                zone=zone_id,
+                needed=False,
+                reason=_clip(f"score_cooldown:{elapsed:.1f}d"),
+                days_since_mopped=elapsed,
+            )
         return MopZoneNeed(
             zone=zone_id,
             needed=True,
