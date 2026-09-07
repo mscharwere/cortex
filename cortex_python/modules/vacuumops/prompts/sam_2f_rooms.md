@@ -32,13 +32,21 @@ People:
 - {{ name }}: {{ p.activity }} (confidence {{ p.confidence }}){% if p.piano %} — PIANO PLAYING{% endif %}{% if p.sleep_confidence %} — sleep confidence {{ p.sleep_confidence }}{% endif %}
 {% endfor %}
 
+Entry gate for {{ zone }}: {{ entry_gate }}
+
+The entry gate is whatever HA entity HomeOps designates as gating entry to this
+zone — a physical door sensor, or a manual toggle that takes the room out of
+service. "on" means the robot may enter. It has ALREADY been enforced upstream:
+a closed or unreadable gate defers before L1 is ever called, so you are only
+ever shown "open" or "none". Do not re-litigate it.
+
 Rooms (2F focus):
-- Master Bathroom: {{ ctx.rooms.master_bathroom.detected }} ({{ ctx.rooms.master_bathroom.confidence }}); occupied={{ ctx.rooms.master_bathroom.raw_occupancy }}; door_open={{ ctx.rooms.master_bathroom.door_open }}
-- Master Bedroom: {{ ctx.rooms.master_bedroom.detected }} ({{ ctx.rooms.master_bedroom.confidence }}); occupied={{ ctx.rooms.master_bedroom.raw_occupancy }}; door_open={{ ctx.rooms.master_bedroom.door_open }}
+- Master Bathroom: {{ ctx.rooms.master_bathroom.detected }} ({{ ctx.rooms.master_bathroom.confidence }}); occupied={{ ctx.rooms.master_bathroom.raw_occupancy }}
+- Master Bedroom: {{ ctx.rooms.master_bedroom.detected }} ({{ ctx.rooms.master_bedroom.confidence }}); occupied={{ ctx.rooms.master_bedroom.raw_occupancy }}
 - Upper Hallway: {{ ctx.rooms.upper_hallway.detected }} ({{ ctx.rooms.upper_hallway.confidence }}); occupied={{ ctx.rooms.upper_hallway.raw_occupancy }}
-- Carlitos Room: {{ ctx.rooms.carlitos_room.detected }} ({{ ctx.rooms.carlitos_room.confidence }}); occupied={{ ctx.rooms.carlitos_room.raw_occupancy }}; door_open={{ ctx.rooms.carlitos_room.door_open }}
-- Kids Table Area: {{ ctx.rooms.kids_table_area.detected }} ({{ ctx.rooms.kids_table_area.confidence }}); occupied={{ ctx.rooms.kids_table_area.raw_occupancy }}; door_open={{ ctx.rooms.master_bedroom.door_open }} (shares master bedroom gate)
-- Daniel's Room: {{ ctx.rooms.daniel_room.detected }} ({{ ctx.rooms.daniel_room.confidence }}); occupied={{ ctx.rooms.daniel_room.raw_occupancy }}; door_open={{ ctx.rooms.daniel_room.door_open }}
+- Carlitos Room: {{ ctx.rooms.carlitos_room.detected }} ({{ ctx.rooms.carlitos_room.confidence }}); occupied={{ ctx.rooms.carlitos_room.raw_occupancy }}
+- Kids Table Area: {{ ctx.rooms.kids_table_area.detected }} ({{ ctx.rooms.kids_table_area.confidence }}); occupied={{ ctx.rooms.kids_table_area.raw_occupancy }}
+- Daniel's Room: {{ ctx.rooms.daniel_room.detected }} ({{ ctx.rooms.daniel_room.confidence }}); occupied={{ ctx.rooms.daniel_room.raw_occupancy }}
 
 Upcoming events (next 2h):
 {% for e in ctx.upcoming_events %}

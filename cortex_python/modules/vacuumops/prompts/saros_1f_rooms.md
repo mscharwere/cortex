@@ -32,9 +32,17 @@ People:
 - {{ name }}: {{ p.activity }} (confidence {{ p.confidence }}){% if p.piano %} — PIANO PLAYING{% endif %}{% if p.sleep_confidence %} — sleep confidence {{ p.sleep_confidence }}{% endif %}
 {% endfor %}
 
+Entry gate for {{ zone }}: {{ entry_gate }}
+
+The entry gate is whatever HA entity HomeOps designates as gating entry to this
+zone — a physical door sensor, or a manual toggle that takes the room out of
+service. "on" means the robot may enter. It has ALREADY been enforced upstream:
+a closed or unreadable gate defers before L1 is ever called, so you are only
+ever shown "open" or "none". Do not re-litigate it.
+
 Rooms (1F focus):
 {% for key, r in ctx.rooms.items() %}
-- {{ key }}: {{ r.detected }} ({{ r.confidence }}); occupied={{ r.raw_occupancy }}{% if r.door_open is not none %}; door_open={{ r.door_open }}{% endif %}
+- {{ key }}: {{ r.detected }} ({{ r.confidence }}); occupied={{ r.raw_occupancy }}
 {% endfor %}
 
 Upcoming events (next 2h):

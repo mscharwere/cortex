@@ -28,9 +28,15 @@ from cortex_python.modules.vacuumops.schemas import DecisionEntry, ZoneInfo, Zon
 
 # Explicit zone-label → ctx.rooms key mapping for every known zone.
 # room_key=None means the zone has no parent room sensor (sub-zone);
-# zone_active_use_check and door_open_check treat these as always clear.
+# zone_active_use_check treats these as having no tier-2 signal.
 # Add a new entry here whenever a zone is added to HomeOps or an HA sensor
 # is renamed — never rely on convention-based derivation.
+#
+# Every value here MUST exist as a key in vacuumops_synth._TRACKED_ROOMS. A value
+# that does not match is not an error anywhere — ctx.rooms.get() simply returns
+# None and the lookup degrades silently. "Master Bathroom" carried "master_bath"
+# against a tracked room named "master_bathroom" for months on exactly that basis.
+# test_homeops_adapter.py pins the two lists against each other.
 _ZONE_LABEL_TO_ROOM_KEY: dict[str, str | None] = {
     # Ethan 3F
     "Litter Box": None,
@@ -45,7 +51,7 @@ _ZONE_LABEL_TO_ROOM_KEY: dict[str, str | None] = {
     "Prep Area": None,
     "Dining Table": "dining_room",
     # Sam 2F
-    "Master Bathroom": "master_bath",
+    "Master Bathroom": "master_bathroom",
     "Master Bedroom": "master_bedroom",
     "Upper Hallway": "upper_hallway",
     "Carlitos Room": "carlitos_room",
@@ -340,6 +346,21 @@ class HomeOpsAdapter:
                 occupancy_sensor=z.get("occupancy_sensor"),
                 # Spec §1.1: already in HomeOps API response (migration 014); was dropped here.
                 # Now mapped so Override 2 can resolve the zone's parent room key.
+                #
+                # Entry gate — any HA entity that gates entry to this zone (a door
+                # binary_sensor, or a manual input_boolean for Guest Mode etc.).
+                # Same payload, same nullable-string contract, same hydration path
+                # as occupancy_sensor directly above.
+                entry_gate_entity=z.get("entry_gate_entity"),
+                # Feature detection on KEY PRESENCE, not on value. The HomeOps
+                # zones serializer maps every column explicitly and emits nulls
+                # (`x ?? null`), so a present-but-null key means "column exists,
+                # this zone has no gate" while an ABSENT key means "this HomeOps
+                # build predates the column". Conflating the two would silently
+                # disable every entry gate in the fleet the moment CORTEX deployed
+                # ahead of HomeOps — the same trap mop_tracking_available exists
+                # to avoid, solved here without needing a second server-side field.
+                entry_gate_supported="entry_gate_entity" in z,
                 # Mop-cadence gate inputs (HomeOps migration 20260809000000).
                 # last_mopped_at drives the 7-day schedule arm; mop_requested_at is
                 # the signal arm. Both None when HomeOps predates the migration,
