@@ -307,17 +307,25 @@ class Saros1FRoomsJob(VacuumJob):
     carries entry_gate_entity IS NULL in HomeOps, and entry_gate_check passes
     those immediately without an HA lookup.
 
-    DEPLOY ORDER: the Bathroom's gate entity moved out of a hardcoded map in the
-    synth and into HomeOps. The HomeOps migration must seed zone 20 with
-    binary_sensor.first_level_bathroom_door_sensor — the Z-Wave JS "Door state
-    (simple)" collapsed binary (device_class=door, on=open), which matches the
-    uniform on=proceed polarity. NOT one of its "...window_door_is_closed"
-    siblings: those are inverted (on=closed) and carry no device_class, so they
-    would defer precisely when the door is open. Verified against live HA
-    2026-08-11 (204 transitions/7d, the open- and closed-family entities
-    perfectly anti-correlated). Until zone 20 is seeded, entry_gate_check defers
-    the Bathroom with gate_column_unavailable / gate_none rather than dispatching
-    into it — safe in both directions, but visible in the decision log.
+    DEPLOY ORDER — HOMEOPS FIRST. The Bathroom's gate entity moved out of a
+    hardcoded map in the synth and into HomeOps
+    (vac_zone_cleanliness.entry_gate_entity, migration 20260907000000). Zone 20
+    is seeded there with binary_sensor.first_level_bathroom_door_sensor — the
+    Z-Wave JS "Door state (simple)" collapsed binary (device_class=door,
+    on=open), which matches the uniform on=proceed polarity. NOT one of its
+    "...window_door_is_closed" siblings: those are inverted (on=closed) and carry
+    no device_class, so they would defer precisely when the door is open.
+    Verified against live HA 2026-08-11 (204 transitions/7d, the open- and
+    closed-family entities perfectly anti-correlated).
+
+    If CORTEX ships ahead of that migration, entry_gate_supported is False and
+    EVERY zone of this job defers with gate_column_unavailable — not just the
+    Bathroom. Same for Sam2FJob. That is loud (ERROR per zone per tick), visible
+    in the decision log, and self-heals on the first tick after HomeOps deploys,
+    but it does park both robots' room jobs in the meantime. The alternative —
+    treating an absent column as "no zone has a gate" — would silently dispatch
+    into a shut Bathroom, which is the incident this whole mechanism exists to
+    prevent, so the trade is deliberate.
     """
 
     job_id: str = "saros_1f_rooms"
