@@ -293,6 +293,14 @@ def _render_prompt(
     zone_meta = resolve_zone_meta(zone_id, ctx)
     zone_score = ctx.zone_scores.get(zone_id)
 
+    # Entry gate, for the zone under evaluation only. Rendered from the same
+    # ZoneMeta → ctx.gate_readings path R1 uses, so the prompt can never disagree
+    # with the gate. Purely informational: L1 is only reached once the
+    # effectiveness gate (entry_gate_check included) has fully PASSED, so this
+    # always reads "none" or "open" in practice — it is here so the model can see
+    # WHY a room was enterable, not to re-decide it.
+    entry_gate = _describe_entry_gate(zone_meta, ctx)
+
     # Resolve zone label for template (StrictUndefined requires all {{ }} vars present)
     zone_label = ctx.zone_info[zone_id].label if zone_id in ctx.zone_info else str(zone_id)
 
@@ -327,8 +335,28 @@ def _render_prompt(
             if opportunity_read is not None
             else "not evaluated for this zone"
         ),
+        entry_gate=entry_gate,
     )
     return rendered
+
+
+def _describe_entry_gate(zone_meta: ZoneMeta, ctx: ContextSnapshot) -> str:
+    """One-line human rendering of a zone's entry-gate state for the L1 prompt.
+
+    Mirrors entry_gate_check's resolution exactly (ZoneMeta.entry_gate_entity →
+    ctx.gate_readings, by entity id) so the prompt and the gate can never tell
+    the model two different stories.
+    """
+    if not zone_meta.entry_gate_supported:
+        return "unknown (HomeOps build predates the entry_gate_entity column)"
+    entity_id = zone_meta.entry_gate_entity
+    if not entity_id:
+        return "none (this zone has no entry gate)"
+    reading = ctx.gate_readings.get(entity_id)
+    if reading is None or not reading.resolved:
+        raw = reading.raw_state if reading is not None else None
+        return f"UNRESOLVED ({entity_id} = {raw or 'not read'})"
+    return f"{'open' if reading.proceed else 'CLOSED'} ({entity_id})"
 
 
 async def run_l1(

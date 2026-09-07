@@ -19,7 +19,7 @@ class VacuumJob:
 
     Fields added for multi-robot fleet expansion:
       effectiveness_scope — controls which occupancy gates run in R1 (spec §7.2)
-      door_check          — whether R1 runs door_open_check (R1-E4)
+      door_check          — whether R1 runs entry_gate_check (R1-E4)
     """
 
     # Identity
@@ -66,8 +66,18 @@ class VacuumJob:
     #   "none"      → skip both (zone dispatches regardless of floor/room occupancy)
 
     door_check: bool = False
-    # If True, R1 runs door_open_check: reads room.door_open from ContextSnapshot.
-    # Graceful degradation: door_open=None (sensor missing) → treat as open → PASS.
+    # If True, R1 runs entry_gate_check: resolves ZoneMeta.entry_gate_entity —
+    # any HA entity that gates entry, door sensor or manual input_boolean — and
+    # reads it directly from ctx.gate_readings.
+    #
+    # Name kept as door_check (rather than gate_check) so this rename stays a
+    # pure resolution-path change: which jobs run the gate is unchanged, and the
+    # flag is referenced by job descriptors, tests and the decision log.
+    #
+    # NOT graceful in the old sense: only a zone HomeOps positively reports as
+    # gateless (entry_gate_entity IS NULL) passes without a read. An entity that
+    # is missing, unavailable or unknown BLOCKS. The old "sensor missing → treat
+    # as open" default is exactly what shipped two silent-dispatch bugs.
 
     occupancy_clear_grace_s: int = 120
     # Confirmation window (seconds) an occupancy sensor must have been reporting
@@ -293,10 +303,21 @@ class Saros1FRoomsJob(VacuumJob):
 
     door_check=True gates the Bathroom (zone 20), which has a real door that is
     routinely shut — dispatching into it is mechanically futile. The flag is
-    job-wide but structurally affects the Bathroom only: door_open_check
-    no-ops to "treat as open" for any zone whose room_key is None (Prep Area)
-    or whose room has no mapped/resolvable door entity (Kitchen, Living Room,
-    Hallway, Dining Table — none of these has a binary_sensor.{room}_door in HA).
+    job-wide but structurally affects the Bathroom only: every other 1F zone
+    carries entry_gate_entity IS NULL in HomeOps, and entry_gate_check passes
+    those immediately without an HA lookup.
+
+    DEPLOY ORDER: the Bathroom's gate entity moved out of a hardcoded map in the
+    synth and into HomeOps. The HomeOps migration must seed zone 20 with
+    binary_sensor.first_level_bathroom_door_sensor — the Z-Wave JS "Door state
+    (simple)" collapsed binary (device_class=door, on=open), which matches the
+    uniform on=proceed polarity. NOT one of its "...window_door_is_closed"
+    siblings: those are inverted (on=closed) and carry no device_class, so they
+    would defer precisely when the door is open. Verified against live HA
+    2026-08-11 (204 transitions/7d, the open- and closed-family entities
+    perfectly anti-correlated). Until zone 20 is seeded, entry_gate_check defers
+    the Bathroom with gate_column_unavailable / gate_none rather than dispatching
+    into it — safe in both directions, but visible in the decision log.
     """
 
     job_id: str = "saros_1f_rooms"
@@ -344,7 +365,7 @@ class Saros1FRoomsJob(VacuumJob):
         default_factory=lambda: [
             "zone_active_use_check",
             "floor_clearance_check",
-            "door_open_check",
+            "entry_gate_check",
             "transit_pattern_lookahead",
             "noise_budget_check",
             "noise_radius_check",
@@ -391,7 +412,7 @@ class Sam2FJob(VacuumJob):
     r1_rules: list[str] = field(
         default_factory=lambda: [
             "zone_active_use_check",
-            "door_open_check",
+            "entry_gate_check",
             "transit_pattern_lookahead",
             "noise_budget_check",
             "noise_radius_check",

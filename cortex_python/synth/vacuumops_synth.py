@@ -34,6 +34,7 @@ from cortex_python.modules.vacuumops.noise import noise_budget
 from cortex_python.modules.vacuumops.schemas import (
     CalendarEvent,
     ContextSnapshot,
+    GateReading,
     OccupancyReading,
     PersonActivity,
     RobotState,
@@ -82,24 +83,18 @@ _ROBOT_ENTITY_MAP: dict[str, dict[str, str]] = {
     },
 }
 
-# Explicit room → HA entity overrides for door gate sensors.
-# Add an entry whenever a room's door sensor doesn't follow the
-# binary_sensor.{room}_door naming convention.
-_DOOR_ENTITY_MAP: dict[str, str] = {
-    "carlitos_room": "binary_sensor.sam_carlitos_room_door_gate",
-    "daniel_room": "binary_sensor.sam_daniel_s_room_door_gate",
-    "master_bathroom": "binary_sensor.sam_master_bathroom_door_gate",
-    "master_bedroom": "binary_sensor.sam_master_bedroom_door_gate",
-    # 1F Bathroom (Saros zone 20). The Z-Wave device exposes NINE binary_sensors
-    # for this one physical reed switch; the entity below is the Z-Wave JS
-    # "Door state (simple)" collapsed binary — device_class=door, on=open —
-    # which is the polarity door_open_check expects. Do NOT swap this for a
-    # "...window_door_is_closed" sibling: those are INVERTED (on=closed) and
-    # carry no device_class, so the gate would defer exactly when the door is
-    # open. Verified against live HA 2026-08-11 (204 transitions/7d, the open-
-    # and closed-family entities perfectly anti-correlated).
-    "bathroom": "binary_sensor.first_level_bathroom_door_sensor",
-}
+# NOTE — there is deliberately no _DOOR_ENTITY_MAP here any more, and no
+# "binary_sensor.<room-key>-plus-a-suffix" naming-convention fallback. Entry gating is
+# configured per zone in HomeOps (vac_zone_cleanliness.entry_gate_entity) and
+# read here by entity id, exactly as occupancy_sensor already is.
+#
+# The removed pattern produced two real dispatch bugs in five weeks: a July 2026
+# fetch-ordering bug (PR #40) and a room-key mismatch ("master_bath" vs
+# "master_bathroom") that made Master Bathroom's gate resolve to "no sensor" →
+# "treat as open". Both share one root cause — a room-key-indexed lookup that,
+# when the key does not match, yields silence rather than an error. Do not
+# reintroduce a hardcoded map or a name guess in any form; add the entity to the
+# HomeOps column instead.
 
 
 # Dedicated per-floor occupancy rollups from the area_occupancy HACS integration
@@ -118,6 +113,19 @@ _FLOOR_OCCUPANCY_ENTITY: dict[str, str] = {
 # set _fetch_room_activity has always used, so this refactor introduces no
 # parsing drift alongside the behavioural changes.
 _OCCUPIED_STATES = ("on", "true", "1")
+
+# Entry-gate polarity. EXACTLY these two strings are meaningful; everything else
+# — "unavailable", "unknown", "open", "closed", a missing entity — is unresolved
+# and makes entry_gate_check block.
+#
+# The strictness is the point. The permissive tuple the door gate used
+# (`state in ("on","true","open")`, everything else falsy → "closed"… but a
+# missing entity → None → "treat as open") is what let a typo read as an open
+# door. An entry gate may be a binary_sensor OR an input_boolean, and both
+# domains report exactly "on"/"off", so no laxity is needed to cover the
+# supported sources.
+_GATE_PROCEED_STATE = "on"
+_GATE_BLOCK_STATE = "off"
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
@@ -219,6 +227,59 @@ async def _fetch_occupancy_readings(
     return out
 
 
+async def _fetch_gate_reading(ha_adapter: HARestAdapter, entity_id: str) -> GateReading:
+    """Read one entry-gate entity. Anything but a clean "on"/"off" is UNRESOLVED.
+
+    Note the asymmetry with _fetch_occupancy_reading: an unreadable occupancy
+    sensor falls through to a coarser tier, but an unreadable gate has no coarser
+    tier and must block. So this returns resolved=False rather than a defaulted
+    proceed value, and the caller is required to treat that as a block.
+
+    The entity may be any domain — binary_sensor for a physical door,
+    input_boolean for a manual room disable. Both report "on"/"off", so the
+    parsing is domain-agnostic and no device_class inspection is needed.
+    """
+    state = await ha_adapter.get_entity_state(entity_id)
+    if state is None:
+        return GateReading(entity_id=entity_id, proceed=False, resolved=False, raw_state=None)
+    raw = str(state.get("state", "")).lower()
+    if raw == _GATE_PROCEED_STATE:
+        return GateReading(entity_id=entity_id, proceed=True, resolved=True, raw_state=raw)
+    if raw == _GATE_BLOCK_STATE:
+        return GateReading(entity_id=entity_id, proceed=False, resolved=True, raw_state=raw)
+    return GateReading(entity_id=entity_id, proceed=False, resolved=False, raw_state=raw)
+
+
+async def _fetch_gate_readings(
+    ha_adapter: HARestAdapter, zone_metadata: dict[int, ZoneMeta]
+) -> dict[str, GateReading]:
+    """Read every HomeOps-designated entry_gate_entity directly, keyed by entity id.
+
+    Mirrors _fetch_occupancy_readings: deduped across zones that share a gate
+    (Kids Table Area rides the Master Bedroom door), so this is ~5 HA calls, not
+    one per zone. Zones with a null entry_gate_entity are skipped entirely — they
+    have no gate and cost nothing.
+
+    A fetch that raises still lands in the map as resolved=False, so the gate
+    blocks loudly rather than vanishing. An HA outage therefore parks the gated
+    jobs for the tick instead of waving them through; that is the intended
+    direction of failure for a physical action taken unsupervised.
+    """
+    out: dict[str, GateReading] = {}
+    for meta in zone_metadata.values():
+        entity_id = meta.entry_gate_entity
+        if not entity_id or entity_id in out:
+            continue
+        try:
+            out[entity_id] = await _fetch_gate_reading(ha_adapter, entity_id)
+        except Exception as exc:
+            log.warning("entry_gate_fetch_failed", entity_id=entity_id, error=str(exc))
+            out[entity_id] = GateReading(
+                entity_id=entity_id, proceed=False, resolved=False, raw_state=None
+            )
+    return out
+
+
 async def _fetch_person_activity(ha_adapter: HARestAdapter, name: str) -> PersonActivity:
     """Fetch PersonActivity for one person from HA REST."""
     entity_id = f"sensor.{name}_activity"
@@ -243,34 +304,21 @@ async def _fetch_person_activity(ha_adapter: HARestAdapter, name: str) -> Person
 
 
 async def _fetch_room_activity(ha_adapter: HARestAdapter, room: str) -> RoomActivity | None:
-    """Fetch RoomActivity for one room. Returns None if sensors unavailable."""
+    """Fetch RoomActivity for one room. Returns None if sensors unavailable.
+
+    This function no longer reads any door/gate entity. The July 2026 bug this
+    used to carry (door read ordered behind an early return, so rooms with no
+    occupancy sensor skipped the door fetch entirely) is now structurally
+    impossible: entry gating does not pass through RoomActivity, or through a
+    room key, at all. See _fetch_gate_readings.
+    """
     occupancy_id = f"binary_sensor.{room}_occupancy_status"
     activity_id = f"sensor.{room}_detected_activity"
 
     occ_state = await ha_adapter.get_entity_state(occupancy_id)
     act_state = await ha_adapter.get_entity_state(activity_id)
 
-    # Door sensor fetched unconditionally — must not be gated on occupancy/activity
-    # availability. Rooms without occupancy sensors (e.g. Carlitos Room) would
-    # otherwise bypass the door-closed gate entirely (confirmed bug: 2026-07-17).
-    door_open: bool | None = None
-    door_entity = _DOOR_ENTITY_MAP.get(room, f"binary_sensor.{room}_door")
-    door_state = await ha_adapter.get_entity_state(door_entity)
-    if door_state is not None and door_state.get("state") not in ("unavailable", "unknown", None):
-        door_open = door_state.get("state", "off").lower() in ("on", "true", "open")
-
     if occ_state is None and act_state is None:
-        # No occupancy data — but surface door state if available so the door gate fires.
-        # occupancy_available stays False: raw_occupancy=False here is a placeholder,
-        # not evidence the room is empty, and the gate must fall through to the floor.
-        if door_open is not None:
-            return RoomActivity(
-                detected="unknown",
-                confidence=0.0,
-                raw_occupancy=False,
-                door_open=door_open,
-                occupancy_available=False,
-            )
         return None
 
     raw_occupancy = False
@@ -297,7 +345,6 @@ async def _fetch_room_activity(ha_adapter: HARestAdapter, room: str) -> RoomActi
         detected=detected,
         confidence=confidence,
         raw_occupancy=raw_occupancy,
-        door_open=door_open,
         occupancy_last_changed=occupancy_last_changed,
         occupancy_available=occ_state is not None,
     )
@@ -547,6 +594,18 @@ async def build_snapshot(
         occupancy_readings = {}
         degraded = True
 
+    # ── Entry gates — per-zone designated gate entities ───────────────────────
+    # Read by entity id off ZoneMeta.entry_gate_entity, deduped across zones that
+    # share a gate. A blanket failure here leaves gate_readings empty, which
+    # entry_gate_check reads as "unresolved" for every gated zone and blocks them
+    # — the intended direction. It must never read as "no gate configured".
+    try:
+        gate_readings = await _fetch_gate_readings(ha_adapter, zone_metadata)
+    except Exception as exc:
+        log.warning("entry_gate_fetch_failed", error=str(exc))
+        gate_readings = {}
+        degraded = True
+
     # ── Robots ────────────────────────────────────────────────────────────────
     robot_states: dict[str, RobotState] = {}
     for robot in ("ethan", "sam", "saros"):
@@ -603,6 +662,7 @@ async def build_snapshot(
         zone_metadata=zone_metadata,
         occupancy_readings=occupancy_readings,
         floor_occupancy=floor_occupancy,
+        gate_readings=gate_readings,
         upcoming_events=upcoming_events,
         robot_states=robot_states,
         quiet_hours_1f=quiet_hours_1f,

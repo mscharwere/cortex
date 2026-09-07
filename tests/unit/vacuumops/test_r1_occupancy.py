@@ -32,7 +32,12 @@ from cortex_python.modules.vacuumops.r1 import (
     zone_active_use_check,
 )
 from cortex_python.modules.vacuumops.schemas import ZoneMeta
-from tests.unit.vacuumops.conftest import make_occupancy, make_room, make_snapshot
+from tests.unit.vacuumops.conftest import (
+    gated_zone_metadata,
+    make_occupancy,
+    make_room,
+    make_snapshot,
+)
 
 _NOW = datetime(2026, 5, 24, 15, 0, 0, tzinfo=timezone.utc)
 
@@ -70,6 +75,17 @@ def _saros_ctx(**kw: object):
     ctx = make_snapshot(timestamp=_NOW, **kw)  # type: ignore[arg-type]
     ctx.rooms["dining_room"] = make_room("unknown", 0.0, occupancy_available=False)
     ctx.rooms["prep_area"] = make_room("unknown", 0.0, occupancy_available=False)
+    # Saros1FRoomsJob runs the R1-E4 entry gate, which resolves ZoneMeta out of
+    # ctx.zone_metadata and BLOCKS when the zone has no row (see entry_gate_check
+    # — "metadata unavailable" is not "no gate"). These tests are about the
+    # occupancy chain, downstream of which the entry gate sits, so the wiring is
+    # stated: every 1F zone present, gate-aware HomeOps build, no gate entity.
+    #
+    # Note this is separate from the `zone_meta=` argument these tests pass to
+    # run_r1 — that one feeds the occupancy chain (occupancy_sensor,
+    # low_disruption); the entry gate deliberately reads only the authoritative
+    # ctx map so no caller can weaken it with a hand-built ZoneMeta.
+    ctx.zone_metadata.update(gated_zone_metadata(*Saros1FRoomsJob().zones))
     return ctx
 
 

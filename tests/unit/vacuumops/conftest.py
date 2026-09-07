@@ -10,11 +10,13 @@ import pytest
 from cortex_python.modules.vacuumops.jobs import Ethan3FLitterBoxJob
 from cortex_python.modules.vacuumops.schemas import (
     ContextSnapshot,
+    GateReading,
     OccupancyReading,
     PersonActivity,
     RobotState,
     RoomActivity,
     ZoneInfo,
+    ZoneMeta,
 )
 
 
@@ -44,7 +46,6 @@ def make_room(
     detected: str = "idle",
     confidence: float = 0.8,
     raw_occupancy: bool = False,
-    door_open: bool | None = None,
     occupancy_last_changed: datetime | None = None,
     occupancy_available: bool = True,
 ) -> RoomActivity:
@@ -63,7 +64,6 @@ def make_room(
         detected=detected,
         confidence=confidence,
         raw_occupancy=raw_occupancy,
-        door_open=door_open,
         occupancy_last_changed=occupancy_last_changed,
         occupancy_available=occupancy_available,
     )
@@ -84,6 +84,100 @@ def make_occupancy(
     )
 
 
+def _default_zone_info() -> dict[int, ZoneInfo]:
+    """A fresh copy of the standard zone table on every call.
+
+    Returned fresh rather than shared at module scope because tests mutate
+    ZoneInfo in place (e.g. rewriting room_key to model a mismatched key), and a
+    shared instance would leak that mutation into every later test in the run.
+    """
+    return {
+        # Ethan 3F — Litter Box sub-zone (no room sensor)
+        14: ZoneInfo(label="Litter Box", display="3F Litter Box", unit_id=2, floor="3F", room_key=None),
+        # Ethan 3F — room zones
+        15: ZoneInfo(label="Loft", display="3F Loft", unit_id=2, floor="3F", room_key="loft"),
+        16: ZoneInfo(label="Office", display="3F Office", unit_id=2, floor="3F", room_key="office"),
+        17: ZoneInfo(label="Gym", display="3F Gym", unit_id=2, floor="3F", room_key="gym"),
+        # Saros 1F — room zones
+        19: ZoneInfo(label="Kitchen", display="1F Kitchen", unit_id=1, floor="1F", room_key="kitchen"),
+        20: ZoneInfo(label="Bathroom", display="1F Bathroom", unit_id=1, floor="1F", room_key="bathroom"),
+        21: ZoneInfo(label="Living Room", display="1F Living Room", unit_id=1, floor="1F", room_key="living_room"),
+        22: ZoneInfo(label="Hallway", display="1F Hallway", unit_id=1, floor="1F", room_key="hallway"),
+        # Saros 1F — sub-zones (no room sensor)
+        23: ZoneInfo(label="Litter Box", display="1F Litter Box", unit_id=1, floor="1F", room_key=None),
+        24: ZoneInfo(label="Prep Area", display="1F Prep Area", unit_id=1, floor="1F", room_key=None),
+        25: ZoneInfo(label="Dining Table", display="1F Dining Table", unit_id=1, floor="1F", room_key="dining_room"),
+        # Sam 2F — room zones
+        1: ZoneInfo(label="Master Bathroom", display="2F Master Bathroom", unit_id=3, floor="2F", room_key="master_bathroom"),
+        2: ZoneInfo(label="Master Bedroom", display="2F Master Bedroom", unit_id=3, floor="2F", room_key="master_bedroom"),
+        3: ZoneInfo(label="Upper Hallway", display="2F Upper Hallway", unit_id=3, floor="2F", room_key="upper_hallway"),
+        4: ZoneInfo(label="Carlitos Room", display="2F Carlitos Room", unit_id=3, floor="2F", room_key="carlitos_room"),
+        # Sam 2F — sub-zone (no room sensor)
+        5: ZoneInfo(label="Kids Table Area", display="2F Kids Table Area", unit_id=3, floor="2F", room_key=None),
+        6: ZoneInfo(label="Daniel's Room", display="2F Daniel's Room", unit_id=3, floor="2F", room_key="daniel_room"),
+    }
+
+
+def make_gate(
+    entity_id: str = "binary_sensor.test_door_gate",
+    proceed: bool = True,
+    resolved: bool = True,
+    raw_state: str | None = None,
+) -> GateReading:
+    """Build a GateReading for an entry-gate entity.
+
+    raw_state defaults to the string implied by proceed/resolved so callers only
+    have to state the semantic they care about. Pass it explicitly to model an
+    "unavailable"/"unknown" read.
+    """
+    if raw_state is None:
+        raw_state = ("on" if proceed else "off") if resolved else None
+    return GateReading(
+        entity_id=entity_id, proceed=proceed, resolved=resolved, raw_state=raw_state
+    )
+
+
+def make_gated_zone_meta(
+    zone_id: int,
+    entry_gate_entity: str | None,
+    *,
+    unit_id: int = 3,
+    entry_gate_supported: bool = True,
+) -> ZoneMeta:
+    """ZoneMeta for a zone on a HomeOps build that knows about entry gates.
+
+    entry_gate_supported defaults True — the post-migration world. Pass False to
+    model a HomeOps build predating the column, which entry_gate_check must treat
+    as unresolved rather than as "no gate".
+    """
+    return ZoneMeta(
+        zone_id=zone_id,
+        unit_id=unit_id,
+        entry_gate_entity=entry_gate_entity,
+        entry_gate_supported=entry_gate_supported,
+    )
+
+
+def gated_zone_metadata(
+    *zone_ids: int, entry_gate_entity: str | None = None
+) -> dict[int, ZoneMeta]:
+    """zone_metadata for the given zones on a gate-aware HomeOps build.
+
+    Convenience for the many tests that are not about entry gating but run a
+    door_check job (Saros 1F rooms, Sam 2F) and so need the gate to resolve to a
+    definite "this zone has no gate" rather than to "metadata unavailable".
+    """
+    return {
+        zone_id: ZoneMeta(
+            zone_id=zone_id,
+            unit_id=1,
+            entry_gate_entity=entry_gate_entity,
+            entry_gate_supported=True,
+        )
+        for zone_id in zone_ids
+    }
+
+
 def make_snapshot(
     *,
     robot_state: str = "docked",
@@ -100,6 +194,8 @@ def make_snapshot(
     home_empty: bool = False,
     occupancy_readings: dict | None = None,
     floor_occupancy: dict | None = None,
+    zone_metadata: dict | None = None,
+    gate_readings: dict | None = None,
 ) -> ContextSnapshot:
     if timestamp is None:
         timestamp = datetime(2026, 5, 24, 15, 0, 0, tzinfo=timezone.utc)  # 8 AM PST
@@ -121,13 +217,15 @@ def make_snapshot(
         "master_bedroom": make_room("idle"),
         "carlitos_room": make_room("idle"),
         "upper_hallway": make_room("idle"),
-        "master_bath": make_room("idle"),
+        "master_bathroom": make_room("idle"),
         "kids_table_area": make_room("idle"),
         "loft": make_room("idle"),
         "office": make_room("idle"),
         "gym": make_room("idle"),
         "daniel_room": make_room("idle"),
     }
+
+    zone_table = _default_zone_info()
 
     ctx = ContextSnapshot(
         timestamp=timestamp,
@@ -136,37 +234,7 @@ def make_snapshot(
         people=people if people is not None else default_people,
         rooms=rooms if rooms is not None else default_rooms,
         zone_scores={14: litter_box_score},
-        zone_info={
-            # Ethan 3F — Litter Box sub-zone (no room sensor)
-            14: ZoneInfo(
-                label="Litter Box",
-                display="3F Litter Box",
-                unit_id=2,
-                floor="3F",
-                room_key=None,
-            ),
-            # Ethan 3F — room zones
-            15: ZoneInfo(label="Loft", display="3F Loft", unit_id=2, floor="3F", room_key="loft"),
-            16: ZoneInfo(label="Office", display="3F Office", unit_id=2, floor="3F", room_key="office"),
-            17: ZoneInfo(label="Gym", display="3F Gym", unit_id=2, floor="3F", room_key="gym"),
-            # Saros 1F — room zones
-            19: ZoneInfo(label="Kitchen", display="1F Kitchen", unit_id=1, floor="1F", room_key="kitchen"),
-            20: ZoneInfo(label="Bathroom", display="1F Bathroom", unit_id=1, floor="1F", room_key="bathroom"),
-            21: ZoneInfo(label="Living Room", display="1F Living Room", unit_id=1, floor="1F", room_key="living_room"),
-            22: ZoneInfo(label="Hallway", display="1F Hallway", unit_id=1, floor="1F", room_key="hallway"),
-            # Saros 1F — sub-zones (no room sensor)
-            23: ZoneInfo(label="Litter Box", display="1F Litter Box", unit_id=1, floor="1F", room_key=None),
-            24: ZoneInfo(label="Prep Area", display="1F Prep Area", unit_id=1, floor="1F", room_key=None),
-            25: ZoneInfo(label="Dining Table", display="1F Dining Table", unit_id=1, floor="1F", room_key="dining_room"),
-            # Sam 2F — room zones
-            1: ZoneInfo(label="Master Bathroom", display="2F Master Bathroom", unit_id=3, floor="2F", room_key="master_bath"),
-            2: ZoneInfo(label="Master Bedroom", display="2F Master Bedroom", unit_id=3, floor="2F", room_key="master_bedroom"),
-            3: ZoneInfo(label="Upper Hallway", display="2F Upper Hallway", unit_id=3, floor="2F", room_key="upper_hallway"),
-            4: ZoneInfo(label="Carlitos Room", display="2F Carlitos Room", unit_id=3, floor="2F", room_key="carlitos_room"),
-            # Sam 2F — sub-zone (no room sensor)
-            5: ZoneInfo(label="Kids Table Area", display="2F Kids Table Area", unit_id=3, floor="2F", room_key=None),
-            6: ZoneInfo(label="Daniel's Room", display="2F Daniel's Room", unit_id=3, floor="2F", room_key="daniel_room"),
-        },
+        zone_info=zone_table,
         upcoming_events=upcoming_events or [],
         robot_states={
             "ethan": make_robot_state(robot_state, battery),
@@ -176,8 +244,15 @@ def make_snapshot(
         # the dedicated entities existed (room sensors, then the FLOOR_ROOM_MAP
         # fallback), so pre-existing tests exercise the fallback paths unchanged.
         # Tests targeting the new behaviour pass these explicitly.
-        occupancy_readings=occupancy_readings if occupancy_readings is not None else {},
-        floor_occupancy=floor_occupancy if floor_occupancy is not None else {},
+        # Both default to {}, and deliberately so: an empty zone_metadata means
+        # entry_gate_check sees no ZoneMeta row and BLOCKS. Any test exercising a
+        # door_check job (Sam 2F, Saros 1F rooms) must therefore state its gate
+        # wiring — see gated_zone_metadata() — rather than inherit a permissive
+        # default. That is the whole point of the change; a fixture that quietly
+        # supplied "gate configured, wide open" would hide exactly the regression
+        # this gate exists to catch.
+        zone_metadata=zone_metadata if zone_metadata is not None else {},
+        gate_readings=gate_readings if gate_readings is not None else {},
         quiet_hours_1f=quiet_hours_1f,
         quiet_hours_2f=quiet_hours_2f,
         noise_budget=None,

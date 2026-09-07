@@ -409,24 +409,116 @@ def floor_clearance_check(
     return "PASS", "none", "floor_clear"
 
 
-def door_open_check(job: VacuumJob, zone_id: int, ctx: ContextSnapshot) -> tuple[str, str, str]:
-    """R1-E4: Room door must be open if a door sensor is available.
+def entry_gate_check(
+    job: VacuumJob,
+    zone_id: int,
+    ctx: ContextSnapshot,
+    zone_meta: ZoneMeta | None = None,
+) -> tuple[str, str, str]:
+    """R1-E4: the zone's entry gate must permit entry. Runs when job.door_check.
 
-    Reads room.door_open from ContextSnapshot. The synth fetches
-    binary_sensor.{room_key}_door and sets door_open on RoomActivity.
-    If door_open is None (sensor unavailable), treat as open — graceful
-    degradation. Only runs when job.door_check is True.
+    Resolution is DIRECT: ZoneMeta.entry_gate_entity → ctx.gate_readings[entity].
+    There is no room key anywhere on this path, by design. The old door gate
+    resolved its entity through ctx.rooms[zone_info.room_key], and that
+    indirection produced two live dispatch bugs in five weeks — a July 2026
+    fetch-ordering bug (PR #40) and the "master_bath" vs "master_bathroom" key
+    mismatch, which made Master Bathroom's gate resolve to "no sensor" and
+    default to "open". Both failed the same way: a key that does not match yields
+    silence, and silence was read as permission. Reading the designated entity by
+    id removes the class, not just the two instances — this mirrors what
+    resolve_occupancy_signal already does for occupancy (PR #45).
+
+    The gate entity is generic. It may be a physical door binary_sensor or a
+    manual input_boolean that takes a room out of service (Guest Mode, a nap, a
+    room mid-repaint). Polarity is uniform regardless of source: "on" = the robot
+    may proceed, "off" = blocked.
+
+    Verdicts, in evaluation order:
+
+      no zone metadata row at all
+          → FAIL `gate_zone_metadata_unavailable:<zone>`. HomeOps metadata is
+            degraded; we do not know whether this zone has a gate. Unknown is not
+            "none".
+      no HomeOps column (entry_gate_supported False)
+          → FAIL `gate_column_unavailable:<zone>`. A HomeOps build predating the
+            column omits the key, and reading that as "no gates configured" would
+            silently delete the gate fleet-wide on a cortex-before-homeops
+            deploy. Self-heals on the next tick after HomeOps ships.
+      entry_gate_entity is None
+          → PASS `gate_none:<zone>`. The explicit doorless case (Upper Hallway,
+            Kids Table Area, every zone not yet on the mechanism). No HA lookup is
+            attempted — this is the ONLY pass-without-reading path, and it is
+            reached only on a positive "HomeOps says this zone has no gate".
+      state "on"   → PASS `gate_open:<entity>`
+      state "off"  → FAIL `gate_closed:<entity>`
+      anything else (entity absent from HA, "unavailable", "unknown", unread)
+          → FAIL `gate_entity_unresolved:<entity>:<state>` + an ERROR log. This is
+            the case that used to pass silently. It is now loud on purpose: a
+            misconfigured entity id is an operator error that must surface, and
+            deferring one tick is cheap next to driving into a shut room.
     """
-    zone_info = ctx.zone_info.get(zone_id)
-    room_key = zone_info.room_key if zone_info else None
-    if room_key is None:
-        return "PASS", "none", f"door_sensor_unavailable_treat_open:{zone_id}"
-    room = ctx.rooms.get(room_key)
-    if room is None or room.door_open is None:
-        return "PASS", "none", f"door_sensor_unavailable_treat_open:{zone_id}"
-    if not room.door_open:
-        return "FAIL", "effectiveness", f"door_closed:{zone_id}"
-    return "PASS", "none", f"door_open:{zone_id}"
+    # ctx.zone_metadata is the authority — it is the map homeops_adapter built
+    # from GET /api/vacuum/zones this tick. The zone_meta argument is only a
+    # convenience the caller already resolved from that same map (loop.py:
+    # resolve_zone_meta(zone_id, ctx)), so in production the two are identical.
+    # Preferring ctx means no call path can weaken this gate by handing it a
+    # stale, synthesized or hand-built ZoneMeta — which matters for a check whose
+    # entire purpose is to stop being sensitive to how the caller looked things up.
+    meta = ctx.zone_metadata.get(zone_id)
+    if meta is None:
+        meta = zone_meta
+
+    # A ZoneMeta synthesized as a fallback (l1.resolve_zone_meta returns
+    # ZoneMeta(zone_id, unit_id=0) when HomeOps metadata is missing) carries
+    # entry_gate_supported=False, so it lands in the branch below rather than
+    # masquerading as a zone with no gate.
+    if meta is None:
+        log.error(
+            "entry_gate_zone_metadata_missing",
+            zone_id=zone_id,
+            job_id=job.job_id,
+            robot=job.robot,
+        )
+        return "FAIL", "effectiveness", f"gate_zone_metadata_unavailable:{zone_id}"
+
+    if not meta.entry_gate_supported:
+        log.error(
+            "entry_gate_column_unavailable",
+            zone_id=zone_id,
+            job_id=job.job_id,
+            robot=job.robot,
+            detail=(
+                "HomeOps /api/vacuum/zones omitted entry_gate_entity — build predates the column"
+            ),
+        )
+        return "FAIL", "effectiveness", f"gate_column_unavailable:{zone_id}"
+
+    entity_id = meta.entry_gate_entity
+    if not entity_id:
+        # Positively configured as gateless. The only silent pass.
+        return "PASS", "none", f"gate_none:{zone_id}"
+
+    reading = ctx.gate_readings.get(entity_id)
+    if reading is None or not reading.resolved:
+        raw = reading.raw_state if reading is not None else None
+        log.error(
+            "entry_gate_unresolved",
+            zone_id=zone_id,
+            job_id=job.job_id,
+            robot=job.robot,
+            entity_id=entity_id,
+            raw_state=raw,
+            read_attempted=reading is not None,
+        )
+        return (
+            "FAIL",
+            "effectiveness",
+            f"gate_entity_unresolved:{entity_id}:{raw or 'not_read'}",
+        )
+
+    if not reading.proceed:
+        return "FAIL", "effectiveness", f"gate_closed:{entity_id}"
+    return "PASS", "none", f"gate_open:{entity_id}"
 
 
 def transit_pattern_lookahead(
@@ -1226,7 +1318,9 @@ async def run_r1(
            "room_scoped" → skip floor_clearance_check; resolve the zone's own
                            occupancy through resolve_occupancy_signal() with the
                            PARENT room as the tier-2 candidate (spec §6.4)
-      3b. Door check (R1-E4) — runs when job.door_check=True, after occupancy gates.
+      3b. Entry-gate check (R1-E4) — runs when job.door_check=True, after the
+          occupancy gates. Resolves the gate entity straight off ZoneMeta; see
+          entry_gate_check.
       4. Transit lookahead — ALWAYS runs (not an occupancy gate)
       5. Comfort rules (AMBIGUOUS / PASS-marginal → L1 if job.l1_required or AMBIGUOUS)
          — ALWAYS runs (not an occupancy gate)
@@ -1359,9 +1453,12 @@ async def run_r1(
         # effectiveness_scope == "none": skip both occupancy checks entirely.
         # Used for Ethan 3F Litter Box — dispatches regardless of 3F occupancy.
 
-    # Door check — R1-E4 (Sam 2F only; job.door_check=False for all others)
+    # Entry-gate check — R1-E4 (Sam 2F + Saros 1F rooms; off for all other jobs).
+    # job.door_check still controls WHETHER the gate runs; only how it resolves
+    # its entity changed. zone_meta is passed through so the check reads the
+    # designated entity directly rather than re-deriving anything.
     if job.door_check:
-        result, gate_failed, reason = door_open_check(job, zone_id, ctx)
+        result, gate_failed, reason = entry_gate_check(job, zone_id, ctx, zone_meta)
         if result == "FAIL":
             return result, gate_failed, reason
 

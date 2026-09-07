@@ -31,6 +31,34 @@ class ZoneMeta:
     # NEW (spec §1.1): HA room-level occupancy sensor for the zone's parent room.
     # Already exists in HomeOps DB/API (migration 014); was previously unused by CORTEX.
     # Used in Override 2 to resolve floor-level → room-level occupancy check.
+    entry_gate_entity: str | None = None
+    # HA entity that gates ENTRY to this zone. Source: HomeOps
+    # vac_zone_cleanliness.entry_gate_entity, delivered on the same
+    # GET /api/vacuum/zones payload as occupancy_sensor and hydrated the same way.
+    #
+    # Deliberately generic: this is NOT "the door sensor". It may be a physical
+    # door binary_sensor, or a manual input_boolean that disables a room (Guest
+    # Mode, a nap, a room being painted) — any entity whose state answers "may the
+    # robot enter this room right now?".
+    #
+    # Polarity is uniform regardless of the entity's domain or device_class:
+    #   "on"  → the gate does NOT block; the robot may proceed.
+    #   "off" → the gate blocks.
+    # Anything else (missing entity, "unavailable", "unknown") is NOT "open" — it
+    # is unresolved, and entry_gate_check blocks loudly. See that function.
+    #
+    # None means this zone has no entry gate at all (Upper Hallway, Kids Table
+    # Area, every zone not yet using the mechanism) → the check passes without so
+    # much as an HA lookup.
+    entry_gate_supported: bool = False
+    # Positive feature-detection signal, identical in purpose to
+    # mop_tracking_available below: True only when the HomeOps payload actually
+    # carried an "entry_gate_entity" key. A HomeOps build predating the column
+    # omits the key entirely, and a plain `.get()` would read that as
+    # "no gate configured for any zone" — silently deleting the entry gate across
+    # the whole fleet on a cortex-before-homeops deploy. That is the precise
+    # failure shape this PR exists to remove, so absence of the column is treated
+    # as unresolved (block), never as absence of a gate (pass).
     last_mopped_at: datetime | None = None
     # Mop-cadence gate (mop.py): last time this zone completed a mission with the
     # mop on. Source: HomeOps vac_zone_cleanliness.last_mopped_at (migration
@@ -92,6 +120,38 @@ class OccupancyReading:
 
 
 @dataclass
+class GateReading:
+    """A single live read of a zone's entry-gate entity (ZoneMeta.entry_gate_entity).
+
+    The entity is generic by design — a physical door binary_sensor, or a manual
+    input_boolean that takes a room out of service — so this type carries no
+    door vocabulary. It answers one question: may the robot enter?
+
+    Polarity, uniform across every source domain:
+      state "on"  → ``proceed=True``   — the gate does not block.
+      state "off" → ``proceed=False``  — the gate blocks.
+
+    ``resolved`` is the field that closes the silent-open class of bug. It is
+    False whenever the entity is missing from HA, reports "unavailable" /
+    "unknown", or carries any state outside {"on","off"} — and a caller seeing
+    resolved=False must BLOCK, not pass. ``proceed`` is meaningless (and pinned
+    False) in that case; it exists only so a careless read cannot fail open.
+
+    This is deliberately a different shape from OccupancyReading, whose
+    ``available=False`` means "fall through to a coarser signal". There is no
+    coarser entry-gate signal to fall through to: a gate we cannot read is a gate
+    we must respect.
+    """
+
+    entity_id: str
+    proceed: bool = False
+    resolved: bool = False
+    raw_state: str | None = None
+    # The literal HA state string, kept for the decision-log reason and for
+    # distinguishing "unavailable" from "unknown" from a typo'd entity id.
+
+
+@dataclass
 class RoomActivity:
     """Per-room activity rollup.
 
@@ -106,8 +166,13 @@ class RoomActivity:
     # binary_sensor.<room>_occupancy_status — instantaneous mmWave/Bayes occupancy.
     # NOT trustworthy on its own: pair with occupancy_last_changed and the
     # job's occupancy_clear_grace_s before treating False as "truly clear".
-    door_open: bool | None = None
-    # binary_sensor.{room}_door state. None = sensor unavailable → treat as open.
+    #
+    # NOTE: there is deliberately no door_open field here any more. Entry gating
+    # is resolved from ZoneMeta.entry_gate_entity → ctx.gate_readings, keyed by HA
+    # entity id, never through a room key. Routing a per-zone gate through a
+    # room-keyed structure is what produced both the July 2026 fetch-ordering bug
+    # and the "master_bath" vs "master_bathroom" key mismatch: a room key that
+    # does not match silently yields "no door sensor" → "treat as open".
     occupancy_last_changed: datetime | None = None
     # HA's last_changed on the occupancy entity — when it last flipped on↔off.
     # None = unknown (sensor absent, or a synthetic RoomActivity in tests); the
@@ -229,6 +294,16 @@ class ContextSnapshot:
     # room whose convention-named entity does not exist (confirmed live: no
     # dining_room / prep_area / loft / carlitos_room / upper_hallway /
     # kids_table_area occupancy entity exists in HA).
+
+    # Entry-gate entity readings, keyed by HA entity_id. Built by the synth from the
+    # distinct set of ZoneMeta.entry_gate_entity values, so zones that legitimately
+    # share a gate (Kids Table Area rides the Master Bedroom door) cost one HA call
+    # between them. entry_gate_check looks up by zone_meta.entry_gate_entity —
+    # keyed by ENTITY ID, deliberately never by room key.
+    gate_readings: dict[str, GateReading] = field(default_factory=dict)
+    # An entity with no entry here has not been read at all, which is NOT the same
+    # as "no gate": entry_gate_check treats a missing reading as unresolved and
+    # blocks. Only a null ZoneMeta.entry_gate_entity means "this zone has no gate".
 
     # Derived (computed once when snapshot is built)
     noise_budget: float | None = None

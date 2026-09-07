@@ -59,7 +59,12 @@ from cortex_python.modules.vacuumops.r1 import (
     opportunity_check,
     run_r1,
 )
-from tests.unit.vacuumops.conftest import make_occupancy, make_room, make_snapshot
+from tests.unit.vacuumops.conftest import (
+    gated_zone_metadata,
+    make_occupancy,
+    make_room,
+    make_snapshot,
+)
 
 # The Saros 1F Kitchen. A real zone on the only job that runs this rule.
 ZONE = 19
@@ -200,6 +205,25 @@ def make_ctx(score: float = 70.0, degraded: bool = False, **kwargs: Any) -> Any:
     return ctx
 
 
+def make_gated_ctx(**kwargs: Any) -> Any:
+    """`make_ctx` plus the entry-gate wiring Saros1FRoomsJob needs to reach R1's tail.
+
+    Saros1FRoomsJob carries door_check=True, so entry_gate_check runs and — by
+    design — BLOCKS a zone whose HomeOps metadata is absent, rather than assuming
+    "no metadata, therefore no gate, therefore proceed". These tests are about
+    the opportunity rule, which lives downstream of that gate, so they state the
+    gate wiring explicitly: zone present, gate-aware HomeOps build, no gate
+    configured for this zone.
+
+    Deliberately NOT folded into `make_ctx`: the mission-stats tests in this file
+    rely on `ctx.zone_metadata` being empty to exercise the unit_id-unresolved
+    path, so seeding it globally would quietly change what they assert.
+    """
+    ctx = make_ctx(**kwargs)
+    ctx.zone_metadata.update(gated_zone_metadata(ZONE))
+    return ctx
+
+
 def make_opp_ctx(
     means: list[float] | None = None,
     *,
@@ -301,7 +325,7 @@ class TestInvariantCannotForceDispatch:
         This is the concrete form of "can never force a dispatch": the rule's
         best possible answer must not be able to overturn another rule's veto.
         """
-        ctx = make_ctx(rooms={**_sleeping_rooms()})
+        ctx = make_gated_ctx(rooms={**_sleeping_rooms()})
         job = Saros1FRoomsJob()
         result, gate, reason = await run_r1(
             job,
@@ -1197,7 +1221,7 @@ class TestShadowMode:
         result, gate, reason = await run_r1(
             Saros1FRoomsJob(),
             ZONE,
-            make_ctx(),
+            make_gated_ctx(),
             FakeRedis(),
             [],
             opp_ctx=make_opp_ctx(CURVE_BETTER_WINDOW),
@@ -1212,7 +1236,7 @@ class TestShadowMode:
         _, _, reason = await run_r1(
             Saros1FRoomsJob(),
             ZONE,
-            make_ctx(),
+            make_gated_ctx(),
             FakeRedis(),
             [],
             opp_ctx=make_opp_ctx(CURVE_BETTER_WINDOW),
@@ -1238,7 +1262,9 @@ class TestShadowMode:
         is covered by `test_a_disabled_job_adds_no_noise_to_the_reason`, where
         the string IS bare `all_rules_pass`).
         """
-        result, gate, reason = await run_r1(Saros1FRoomsJob(), ZONE, make_ctx(), FakeRedis(), [])
+        result, gate, reason = await run_r1(
+            Saros1FRoomsJob(), ZONE, make_gated_ctx(), FakeRedis(), []
+        )
         assert (result, gate) == ("PASS", "none")
         assert "opportunity_inert:no_prior_source" in reason
 
