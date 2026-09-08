@@ -216,6 +216,63 @@ def test_transit_pattern_skips_noise_only(litter_box_job, clean_ctx):
     assert result == "PASS"
 
 
+def test_transit_pattern_1f_scoped_does_not_block_ethan_3f(litter_box_job):
+    """Bug regression (patterns.yaml job-scoping fix): carlitos_morning_bus
+    describes 1F foot traffic (front door / hallway on the school-bus walk).
+    Scoped to jobs=[saros_1f_rooms, saros_1f_litter_box], it must NOT block
+    Ethan's 3F litter box job — a 1F event has no physical bearing on 3F.
+
+    litter_box_job fixture == Ethan3FLitterBoxJob (job_id="ethan_3f_litter_box").
+    """
+    import pytz
+
+    pst = pytz.timezone("America/Los_Angeles")
+    ts = pst.localize(datetime(2026, 5, 26, 7, 5, 0)).astimezone(timezone.utc)
+    ctx = make_snapshot(timestamp=ts)
+
+    pattern = {
+        "name": "carlitos_morning_bus",
+        "days": [1, 2, 3, 4, 5],
+        "start": "07:10",
+        "end": "07:35",
+        "relevance": ["transit"],
+        "jobs": ["saros_1f_rooms", "saros_1f_litter_box"],
+    }
+
+    result, gate, reason = transit_pattern_lookahead(
+        litter_box_job, "Litter Box", ctx, [pattern]
+    )
+    assert result == "PASS"
+    assert reason == "no_transit_pattern"
+
+
+def test_transit_pattern_1f_scoped_still_blocks_saros_1f_litter_box():
+    """Same pattern/window DOES fire for the 1F job it's scoped to."""
+    import pytz
+
+    from cortex_python.modules.vacuumops.jobs import Saros1FLitterBoxJob
+
+    pst = pytz.timezone("America/Los_Angeles")
+    ts = pst.localize(datetime(2026, 5, 26, 7, 5, 0)).astimezone(timezone.utc)
+    ctx = make_snapshot(timestamp=ts)
+
+    pattern = {
+        "name": "carlitos_morning_bus",
+        "days": [1, 2, 3, 4, 5],
+        "start": "07:10",
+        "end": "07:35",
+        "relevance": ["transit"],
+        "jobs": ["saros_1f_rooms", "saros_1f_litter_box"],
+    }
+
+    job = Saros1FLitterBoxJob()
+    result, gate, reason = transit_pattern_lookahead(
+        job, "Litter Box", ctx, [pattern]
+    )
+    assert result == "FAIL"
+    assert "carlitos_morning_bus" in reason
+
+
 # ── noise_budget_check ────────────────────────────────────────────────────────
 
 

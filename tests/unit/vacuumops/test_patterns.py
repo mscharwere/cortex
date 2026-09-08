@@ -113,12 +113,60 @@ def test_school_window_relevance_still_window_not_transit(by_name, name):
     assert by_name[name]["relevance"] == ["window"]
 
 
+# ── Job-scoping fix: 1F transit patterns no longer block Ethan's 3F jobs ───────
+#
+# Every pattern used to carry jobs: ["*"], so a purely-1F physical event (e.g.
+# walking Carlitos to the front door for the bus) was incorrectly blocking
+# Ethan's 3F litter box via transit_pattern_lookahead (R1-E3) — observed live
+# as a defer reason of imminent_transit:carlitos_morning_bus on a 3F job.
+# Carlos's decisions (this fix):
+#   1. Delete carlos_costco_monday entirely (irrelevant to any robot).
+#   2. Leave carlos_garbage_wednesday as jobs: ["*"] (genuinely whole-house —
+#      Carlos moves between floors taking out garbage).
+#   3. Scope the 8 foot-traffic patterns below to 1F-only jobs.
+
+_SCOPED_TO_1F = [
+    "carlitos_morning_bus",
+    "daniel_morning_bus",
+    "carlitos_school_arrival",
+    "carlitos_arrival_friday",
+    "elena_daniel_arrival",
+    "elena_daniel_arrival_friday",
+    "family_lunch_weekday",
+    "family_dinner",
+]
+
+_1F_JOBS = {"saros_1f_rooms", "saros_1f_litter_box"}
+
+
+@pytest.mark.parametrize("name", _SCOPED_TO_1F)
+def test_1f_foot_traffic_patterns_scoped_to_saros_only(by_name, name):
+    assert set(by_name[name]["jobs"]) == _1F_JOBS
+
+
+def test_carlos_costco_monday_deleted(by_name):
+    """Carlos: 'seems irrelevant for robot' — removed entirely, not just scoped."""
+    assert "carlos_costco_monday" not in by_name
+
+
+def test_carlos_garbage_wednesday_stays_whole_house(by_name):
+    """Garbage night has Carlos moving between floors — genuinely house-wide,
+    left untouched (still jobs: ["*"])."""
+    assert by_name["carlos_garbage_wednesday"]["jobs"] == ["*"]
+
+
+@pytest.mark.parametrize("name", SCHOOL_WINDOWS)
+def test_school_windows_untouched_by_job_scoping_fix(by_name, name):
+    """Out of scope for this change — window-relevance facts, not transit gates."""
+    assert by_name[name]["jobs"] == ["*"]
+
+
 # ── File integrity ────────────────────────────────────────────────────────────
 
 
 def test_patterns_file_parses_and_is_non_empty(patterns):
     assert isinstance(patterns, list)
-    assert len(patterns) >= 12
+    assert len(patterns) >= 11
 
 
 def test_pattern_names_are_unique(patterns):

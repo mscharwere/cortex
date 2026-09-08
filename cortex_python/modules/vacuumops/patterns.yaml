@@ -27,7 +27,7 @@ patterns:
     end: "07:35"
     description: "Carlos takes Carlitos to the school bus and returns home alone. Front door and hallway actively transited."
     relevance: ["transit"]
-    jobs: ["*"]
+    jobs: ["saros_1f_rooms", "saros_1f_litter_box"]
 
   - name: daniel_morning_bus
     days: [1, 2, 3, 4, 5]
@@ -35,7 +35,7 @@ patterns:
     end: "08:40"
     description: "Carlos takes Daniel to the school bus and returns. After this, house enters school-day quiet mode."
     relevance: ["transit"]
-    jobs: ["*"]
+    jobs: ["saros_1f_rooms", "saros_1f_litter_box"]
 
   # ── School day window (kids absent — NOT a quiet house) ───────────────────
   #
@@ -81,7 +81,7 @@ patterns:
     end: "15:30"
     description: "Carlitos arrives home. Front door, hallway, and common areas actively transited. Backpack drop, kitchen visit typical."
     relevance: ["transit"]
-    jobs: ["*"]
+    jobs: ["saros_1f_rooms", "saros_1f_litter_box"]
 
   - name: carlitos_arrival_friday
     days: [5]
@@ -89,7 +89,7 @@ patterns:
     end: "14:15"
     description: "Carlitos arrives home early on Fridays."
     relevance: ["transit"]
-    jobs: ["*"]
+    jobs: ["saros_1f_rooms", "saros_1f_litter_box"]
 
   - name: elena_daniel_arrival
     days: [1, 2, 3, 4]
@@ -97,7 +97,7 @@ patterns:
     end: "16:10"
     description: "Elena picks up Daniel from school bus and returns home. 1F zones actively transited on arrival."
     relevance: ["transit"]
-    jobs: ["*"]
+    jobs: ["saros_1f_rooms", "saros_1f_litter_box"]
 
   - name: elena_daniel_arrival_friday
     days: [5]
@@ -105,17 +105,9 @@ patterns:
     end: "15:05"
     description: "Elena picks up Daniel — Friday early release."
     relevance: ["transit"]
-    jobs: ["*"]
+    jobs: ["saros_1f_rooms", "saros_1f_litter_box"]
 
   # ── Recurring absence/noise windows ───────────────────────────────────────
-  - name: carlos_costco_monday
-    days: [1]
-    start: "17:20"
-    end: "19:10"
-    description: "Carlos out at Costco. Elena and kids home — pre-dinner or dinner activity on 1F likely."
-    relevance: ["noise"]
-    jobs: ["*"]
-
   - name: carlos_garbage_wednesday
     days: [3]
     start: "20:30"
@@ -131,7 +123,7 @@ patterns:
     end: "13:30"
     description: "Family lunch around 12:30 PM on weekdays. Kitchen and dining area actively in use."
     relevance: ["transit", "noise"]
-    jobs: ["*"]
+    jobs: ["saros_1f_rooms", "saros_1f_litter_box"]
 
   - name: family_dinner
     days: [1, 2, 3, 4, 5, 6, 7]
@@ -139,7 +131,7 @@ patterns:
     end: "18:30"
     description: "Family dinner usually around 5 PM, varies. 1F kitchen and dining actively in use. Do not dispatch 1F jobs."
     relevance: ["transit", "noise"]
-    jobs: ["*"]
+    jobs: ["saros_1f_rooms", "saros_1f_litter_box"]
 
   # ── Piano — calendar-driven, not pattern-driven ────────────────────────────
   # Elena's piano practice varies day-to-day; kids' piano class (Monday) is in
