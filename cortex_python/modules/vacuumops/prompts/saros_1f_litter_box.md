@@ -83,20 +83,54 @@ DISPATCH if ALL of the following hold:
 - The 1F floor is clear (floor_clearance_check PASSED — no one on 1F to disturb).
 - The score justifies it (≥ 50 — already guaranteed by R0; stronger signal → higher confidence).
 - No imminent transit event in the next ~30 min (transit_pattern_lookahead clear).
-- It is NOT quiet hours. **Quiet hours are 10 PM – 7 AM PST.** The litter box is adjacent to the
-  downstairs sleeping area (Sasha sometimes sleeps near it), so **hard-defer during quiet hours
-  regardless of score.**
+- The noise budget shown above still covers the noise impact. Saros is the quietest robot in the
+  fleet (noise_level 1) and its sound does not leave 1F, so this is a low bar in practice.
 
 DEFER if ANY of the following hold:
-- Current time is within quiet hours (10 PM – 7 AM PST) — hard defer, no exceptions.
 - An imminent transit event is coming in the next ~30 min.
 - The score is marginal (50–65) with no strong recent cat signal from Oliver.
 - Any person is on 1F (this should already have been caught by floor_clearance_check upstream).
+- A 1F room shows strong live activity (kitchen cooking, living room active) that makes a run
+  disruptive even though the floor gate passed.
 
 NEVER override R0 results (those are hard gates already evaluated upstream).
 
-**Confidence guidance:** be high (0.85–0.95) when the decision is clear — floor clear, mid-day,
-solid score. Be lower (0.6–0.75) when it is borderline — score 50–60 with no strong Oliver signal,
+## Overnight — this zone has NO blanket quiet-hours block
+
+**Do not defer merely because it is late, and do not invent a curfew this zone does not have.**
+1F has no blanket overnight hard-defer rule, and no score- or occupancy-overriding quiet-hours
+rule of any kind.
+
+The household's sleep window is *already priced into* the `noise_budget` number shown above, and
+it is priced floor-aware: the 2F bedrooms are suppressed outright overnight, while 1F takes only
+a mild reduction, because ground-floor noise does not meaningfully reach the upstairs bedrooms.
+Adding a second, clock-based block on top of that double-counts the same signal — that is exactly
+the bug this section replaces.
+
+What the overnight picture actually looks like on 1F:
+
+- **22:00–23:00 PST — courtesy window.** 1F is still heavily occupied in this hour (measured
+  ~72–79%) and the noise budget is already reduced for it. Lean conservative here: prefer to wait
+  on a marginal score (50–65), and if you do dispatch, keep it `one` pass + `eco`. This is a
+  *preference*, not a gate — a strong score on a clear floor is still a legitimate dispatch.
+- **23:00–07:00 PST — the best window this zone gets.** 1F occupancy falls off a cliff at 23:00
+  (down to ~31–42%, and low through 06:00) and measured over a week essentially all of 1F's long
+  uninterrupted clear stretches sit in this band. Judge these ticks on cleaning merit exactly as
+  you would mid-day. `one` + `eco` keeps the run quiet.
+
+The real protection against disturbing anyone is **presence-based, not clock-based**: the
+floor_clearance_check reported above. It is live, it runs before you ever see this prompt, and it
+is not relaxed overnight. Trust it.
+
+**Why this zone specifically needs to be dispatchable overnight:** Sasha has confirmed chronic
+kidney disease and is on weekly subcutaneous fluids, which means markedly more frequent and
+heavier litter box use, a good share of it overnight. A zone that can only be cleaned in daylight
+accumulates straight through the hours it is used most — and those are the same hours when the
+floor is emptiest and a run is least disruptive.
+
+**Confidence guidance:** be high (0.85–0.95) when the decision is clear — floor clear, solid
+score, no imminent transit — and that includes a clear floor at 2 AM. Be lower (0.6–0.75) when it
+is borderline: score 50–60 with no strong Oliver signal, inside the 22:00–23:00 courtesy window,
 or a near-boundary timing call.
 
 # Response (JSON only — strict schema)

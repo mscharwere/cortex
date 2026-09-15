@@ -82,14 +82,11 @@ DISPATCH if ALL of the following hold:
 - The 1F floor is clear (floor_clearance_check PASSED — no one on 1F to disturb).
 - The score justifies it (≥ 50 — already guaranteed by R0).
 - No imminent transit event in the next ~30 min (transit_pattern_lookahead clear).
-- It is NOT quiet hours. **Quiet hours are 10 PM – 7 AM PST.** The 1F floor has a downstairs
-  sleeping area. **Hard-defer during quiet hours regardless of score or zone.**
 - Noise budget is adequate. The marginal R1 result means noise is at or near the comfort ceiling —
   verify no high-activity signal in the rooms (meal prep in kitchen, TV in living room, piano on 1F)
   that would push past the budget. If there is, defer.
 
 DEFER if ANY of the following hold:
-- Current time is within quiet hours (10 PM – 7 AM PST) — hard defer, no exceptions.
 - An imminent transit event is arriving in the next ~30 min.
 - A high-activity 1F room (kitchen cooking, living room active) makes noise disruptive even though
   the floor gate passed (e.g., gate passed on a grace-period count-down but kitchen is clearly active).
@@ -98,9 +95,38 @@ DEFER if ANY of the following hold:
 
 NEVER override R0 results (those are hard gates already evaluated upstream).
 
-**Confidence guidance:** be high (0.85–0.95) when the decision is unambiguous — floor clear,
-mid-day, no imminent events, score solid. Be lower (0.6–0.75) when borderline — near a quiet-hour
-boundary, score 50–60, or a near-empty noise budget.
+## Overnight — 1F has NO blanket quiet-hours block
+
+**Do not defer merely because it is late, and do not invent a curfew this floor does not have.**
+1F has no blanket overnight hard-defer rule, and no score- or occupancy-overriding quiet-hours
+rule of any kind.
+
+The household's sleep window is *already priced into* the `noise_budget` number shown above, and
+it is priced floor-aware: the 2F bedrooms are suppressed outright overnight and 3F is heavily
+reduced (audible through the 2F ceiling), while 1F takes only a mild reduction, because
+ground-floor noise does not meaningfully reach the upstairs bedrooms. Adding a second,
+clock-based block on top of that double-counts the same signal.
+
+What the overnight picture actually looks like on 1F:
+
+- **22:00–23:00 PST — courtesy window.** 1F is still heavily occupied in this hour (measured
+  ~72–79%) and the noise budget is already reduced for it. Saros runs at noise_level 3 here —
+  louder than the litter-box job — so lean conservative: prefer to wait on a marginal score, and
+  if you do dispatch, keep it `one` pass + `eco`. A preference, not a gate.
+- **23:00–07:00 PST — where 1F's usable windows actually are.** Occupancy falls off a cliff at
+  23:00 (down to ~31–42%, low through 06:00) and essentially all of 1F's long uninterrupted clear
+  stretches sit in this band. Judge these ticks on cleaning merit as you would mid-day, keeping
+  intensity modest.
+
+The real protection against disturbing anyone is **presence-based, not clock-based**: the
+floor_clearance_check reported above. It is live, it runs before you ever see this prompt, and it
+is not relaxed overnight. Trust it, and weigh the live activity signals in the room list — those,
+not the wall clock, are what tell you whether now is a bad moment.
+
+**Confidence guidance:** be high (0.85–0.95) when the decision is unambiguous — floor clear, no
+imminent events, score solid, quiet rooms — and that includes a clear, quiet floor at 2 AM. Be
+lower (0.6–0.75) when borderline — inside the 22:00–23:00 courtesy window, score 50–60, or a
+near-empty noise budget.
 
 # Response (JSON only — strict schema)
 {

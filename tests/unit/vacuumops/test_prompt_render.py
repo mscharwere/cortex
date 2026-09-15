@@ -140,3 +140,64 @@ def test_describe_gate_unsupported_column():
     ctx = _ctx_for_render()
     described = _describe_entry_gate(ZoneMeta(zone_id=1, unit_id=0), ctx)
     assert "predates the entry_gate_entity column" in described
+
+
+# ── 1F prompts must not re-grow a clock-based overnight hard-defer ────────────
+#
+# PR #39 wrote both 1F prompts off the 2F/3F templates, carrying a "quiet hours
+# are 10 PM - 7 AM PST, hard defer, no exceptions" instruction. PR #46 then
+# re-measured 1F occupancy and moved the rule engine the other way: 1F gets only
+# the short quiet_hours_1f courtesy window (22:00-23:00) plus the mild x0.80
+# sleep tier, because 23:00-07:00 is where essentially all of 1F's long clear
+# windows are. Nobody updated the prompts, and because the litter-box job is
+# l1_required=True its stale text blocked EVERY overnight tick for that zone
+# while the l1_required=False rooms job dispatched fine on the corrected rules.
+#
+# The prompts are data files: ruff, mypy and every other gate are blind to them,
+# so a text assertion is the only thing that can catch this drift recurring.
+
+_ONEF_PROMPTS = ["saros_1f_litter_box.md", "saros_1f_rooms.md"]
+
+# Lower-cased substrings that only appear in a blanket clock curfew.
+_CURFEW_PHRASES = [
+    "10 pm – 7 am",
+    "10 pm - 7 am",
+    "hard defer, no exceptions",
+    "hard-defer during quiet hours",
+]
+
+
+@pytest.mark.parametrize("prompt_file", _ONEF_PROMPTS)
+def test_1f_prompt_has_no_blanket_overnight_curfew(prompt_file):
+    """No 1F prompt may instruct a score/occupancy-overriding overnight defer."""
+    text = (_PROMPTS / "prompts" / prompt_file).read_text(encoding="utf-8").lower()
+    for phrase in _CURFEW_PHRASES:
+        assert phrase not in text, (
+            f"{prompt_file} still carries a clock curfew: {phrase!r}"
+        )
+
+
+@pytest.mark.parametrize("prompt_file", _ONEF_PROMPTS)
+def test_1f_prompt_states_the_corrected_overnight_model(prompt_file):
+    """Removing the curfew is not enough — the prompt must say so positively.
+
+    A silent deletion leaves the model free to re-derive a curfew from its own
+    priors about vacuuming at night, which is the failure mode being fixed.
+    """
+    text = (_PROMPTS / "prompts" / prompt_file).read_text(encoding="utf-8").lower()
+    assert "no blanket quiet-hours block" in text
+    assert "22:00–23:00" in text  # the courtesy window it does still respect
+    assert "floor_clearance_check" in text  # the real, presence-based protection
+
+
+def test_2f_prompt_keeps_its_sleep_defer():
+    """The 1F relaxation must not leak upstairs.
+
+    Sam cleans the bedrooms themselves and is the one job where a sleep-window
+    hard defer is correct. noise_budget() blocks 2F outright overnight (x0.05);
+    the prompt says the same thing in words, and both must stay.
+    """
+    text = (
+        (_PROMPTS / "prompts" / "sam_2f_rooms.md").read_text(encoding="utf-8").lower()
+    )
+    assert "hard reason to defer" in text
