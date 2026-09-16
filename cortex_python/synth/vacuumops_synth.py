@@ -68,6 +68,13 @@ _TRACKED_ROOMS = [
     "carlitos_room",
     "daniel_room",
     "kids_table_area",
+    # Iestaf's room (HomeOps zone 28, label "Elena Room"). No
+    # binary_sensor.iestaf_room_occupancy_status in HA yet — a parallel
+    # HA-config PR is building it. Until it lands, _fetch_room_activity returns
+    # None and the room takes _room_default (occupancy_available=False), so the
+    # R1 chain falls through to the 2F floor rollup. That is exactly how
+    # carlitos_room, upper_hallway and kids_table_area behave today.
+    "iestaf_room",
     # 3F (Ethan j9+)
     "loft",
     "office",

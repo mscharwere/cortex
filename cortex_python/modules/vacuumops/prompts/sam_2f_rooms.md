@@ -6,7 +6,8 @@ Decide whether Sam (Roomba j7+, 2F) should be dispatched RIGHT NOW to clean the 
 
 # Job descriptor
 - Robot: Sam
-- Zone: {{ zone }} (one of: Master Bathroom / Master Bedroom / Upper Hallway / Carlitos Room / Kids Table Area / Daniel's Room, Floor 2F)
+- Zone: {{ zone }} (one of: Master Bathroom / Master Bedroom / Upper Hallway / Carlitos Room / Kids Table Area / Daniel's Room / Elena Room, Floor 2F)
+- Note on "Elena Room": that is the VacuumOps zone label only. The room is Iestaf's bedroom (Iestaf lives there; Elena does not). Treat its occupant as Iestaf when reasoning about sleep and disruption.
 - Cleaning params: passes=auto, intensity=auto
 - Noise level: 4 (HIGH — heard house-wide including all bedrooms)
 - Noise radius: house (entire house counts; Sam is the loudest robot in the fleet)
@@ -47,6 +48,7 @@ Rooms (2F focus):
 - Carlitos Room: {{ ctx.rooms.carlitos_room.detected }} ({{ ctx.rooms.carlitos_room.confidence }}); occupied={{ ctx.rooms.carlitos_room.raw_occupancy }}
 - Kids Table Area: {{ ctx.rooms.kids_table_area.detected }} ({{ ctx.rooms.kids_table_area.confidence }}); occupied={{ ctx.rooms.kids_table_area.raw_occupancy }}
 - Daniel's Room: {{ ctx.rooms.daniel_room.detected }} ({{ ctx.rooms.daniel_room.confidence }}); occupied={{ ctx.rooms.daniel_room.raw_occupancy }}
+- Elena Room (Iestaf's bedroom): {{ ctx.rooms.iestaf_room.detected }} ({{ ctx.rooms.iestaf_room.confidence }}); occupied={{ ctx.rooms.iestaf_room.raw_occupancy }}
 
 Upcoming events (next 2h):
 {% for e in ctx.upcoming_events %}

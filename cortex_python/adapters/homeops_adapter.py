@@ -57,6 +57,15 @@ _ZONE_LABEL_TO_ROOM_KEY: dict[str, str | None] = {
     "Carlitos Room": "carlitos_room",
     "Kids Table Area": None,
     "Daniel's Room": "daniel_room",
+    # Zone 28 — Iestaf's room. The KEY is the HomeOps zone label, which is still
+    # "Elena Room": Carlos display-renamed the HA area to "Iestaf room" on
+    # 2026-09-14 but left both the HA area_id (`elena_room`) and the HomeOps
+    # label untouched, so three systems spell this one room three ways. The
+    # VALUE must be the HA entity stem the synth builds ctx.rooms from
+    # (binary_sensor.iestaf_room_occupancy_status), which is `iestaf_room`.
+    # Spelling either side after the other is the "master_bath" bug again:
+    # ctx.rooms.get() returns None and every consumer degrades in silence.
+    "Elena Room": "iestaf_room",
 }
 
 log = structlog.get_logger()

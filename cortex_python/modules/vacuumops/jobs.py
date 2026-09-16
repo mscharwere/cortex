@@ -389,15 +389,33 @@ class Sam2FJob(VacuumJob):
     effectiveness_scope="room_only": each zone evaluated independently on its
     own room occupancy only — no floor-wide block. Door sensors gate entry.
     Quiet hours (9pm–8am) already collapse noise_budget near zero.
+
+    ⚠ THIS LIST IS THE ONLY THING THAT MAKES A ZONE EXIST TO CORTEX.
+    `vacuumops_loop` iterates `job.zones` and nothing else, and `_job_for_zone`
+    resolves ownership out of the same lists. A zone HomeOps knows about but
+    this list omits is not skipped, not deferred and not logged — it is never
+    evaluated, silently, every tick, and an un-iterated zone leaves no
+    decision-log row to be conspicuously absent. Zone 28 (Iestaf's room) sat in
+    HomeOps' zone table for weeks in exactly that state before the 2026-09-15
+    audit found it. When HomeOps gains a 2F zone, it must be added here in the
+    same change.
     """
 
     job_id: str = "sam_2f_rooms"
     occupancy_clear_grace_s: int = 120
     robot: str = "sam"
     zones: list[int] = field(
-        default_factory=lambda: [1, 2, 3, 4, 5, 6]
+        default_factory=lambda: [1, 2, 3, 4, 5, 6, 28]
         # Master Bathroom=1, Master Bedroom=2, Upper Hallway=3,
-        # Carlitos Room=4, Kids Table Area=5, Daniel's Room=6
+        # Carlitos Room=4, Kids Table Area=5, Daniel's Room=6,
+        # Iestaf's room=28 (HomeOps label "Elena Room" — see the note on
+        # _ZONE_LABEL_TO_ROOM_KEY; the label was never renamed alongside the HA
+        # area's display rename, so the label and the room key differ here).
+        #
+        # Nothing else in this config is per-zone. room_key, occupancy_sensor,
+        # entry_gate_entity, unit_id and the dirtiness score all hydrate off
+        # HomeOps per tick (ctx.zone_info / ctx.zone_metadata), so the id alone
+        # is sufficient to bring a zone under every R0/R1/L1 rule this job runs.
     )
     floor: str = "2F"
     effectiveness_scope: str = "room_only"
