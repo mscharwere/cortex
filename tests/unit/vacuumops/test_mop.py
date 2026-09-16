@@ -690,14 +690,26 @@ class TestJobScoping:
         assert d.reason == "off:no_zone_due"
 
 
-# ── §7: settings wiring — dry_run is still env-sourced ───────────────────────
+# ── §7: settings wiring — NOTHING is env-sourced here any more ───────────────
 #
 # Regression guard for ARIIA finding 1: CORTEX_VACUUMOPS_MOP_ENABLED was
 # documented and the dataclass field existed, but nothing connected them —
 # loop.py constructed VacuumOpsConfig(dry_run=...) only, so the switch was dead.
-# The original tests missed it because they built VacuumOpsConfig directly.
-# mop_enabled is no longer env-sourced at all (see §7b below for its
-# replacement coverage) — dry_run is the one field remaining here.
+# The original tests missed it because they built VacuumOpsConfig directly,
+# which is why these go through build_vacuumops_config().
+#
+# ⚠ This header used to read "dry_run is still env-sourced" and "dry_run is the
+# one field remaining here". Both became false on 2026-09-16 — and were
+# contradicted by `test_dry_run_is_gone_entirely` twenty lines below, in the
+# very section they introduced. As of that date NO VacuumOps field is
+# env-sourced: mop_enabled and opportunity_actuate are live DB settings (§7b),
+# prior_learner_enabled is a live DB setting with no dataclass field at all, and
+# dry_run is deleted outright.
+#
+# The section is KEPT, empty of env-sourced fields, because it is the named seam
+# the "kill switch shipped unwired" finding is guarded at: the next field that
+# IS env-sourced must be wired in build_vacuumops_config() and asserted here,
+# rather than read inline somewhere in the loop.
 
 
 _REQUIRED_ENV = {

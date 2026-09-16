@@ -1320,9 +1320,30 @@ class TestPerJobFlags:
         assert VacuumOpsConfig().opportunity_actuate is False
         assert VacuumOpsConfig().opportunity_actuate_degraded is False
 
-        settings = MagicMock(spec=Settings)
-        settings.cortex_vacuumops_dry_run = False
-        settings.cortex_vacuumops_prior_learner_enabled = True
+        # ⚠ `spec_set`, not `spec`. `spec=` restricts attribute READS; it lets a
+        # write to a field the real class does not have succeed silently. This
+        # block used to set `cortex_vacuumops_dry_run` and
+        # `cortex_vacuumops_prior_learner_enabled` — both deleted from Settings
+        # by this change, and both asserted absent elsewhere in the suite — and
+        # the writes went on passing because nothing was checking.
+        #
+        # The dead lines are gone AND the mock is tightened, because removing
+        # them alone would leave the trap for the next one: with `spec_set`, a
+        # write to a retired setting raises AttributeError instead of quietly
+        # configuring nothing.
+        #
+        # ⚠ Be exact about what that buys, because the tempting overstatement is
+        # wrong. `spec_set` against a pydantic model blocks EVERY attribute
+        # write, not just retired ones — its fields are instance state, not
+        # class attributes, so even `cortex_api_key` is rejected. It is usable
+        # HERE only because this test sets nothing at all after the cleanup, and
+        # that is the property it pins: this mock is a read-only stand-in.
+        #
+        # A future test that genuinely needs to SET a real setting cannot use
+        # `spec_set` and should not be made to contort around it — use `spec=`
+        # there and check the field still exists. Do not copy this line
+        # reflexively; copy the reason.
+        settings = MagicMock(spec_set=Settings)
         assert build_vacuumops_config(settings).opportunity_actuate is False
 
     def test_the_active_roster_matches(self) -> None:
