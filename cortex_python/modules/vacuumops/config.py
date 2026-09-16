@@ -155,9 +155,15 @@ class VacuumOpsConfig:
     # It was CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED until then, and the reason it
     # moved is the same argument that used to justify keeping it an env var:
     # settings.py said it "does not need to be hot-flippable" because it gates no
-    # physical action. But its failure mode is unrecoverable lost sample time —
-    # so a switch you might need to fix in seconds was the one requiring SSH and
-    # a container restart. Same premise, opposite conclusion.
+    # physical action.
+    #
+    # ⚠ NOT because pausing it loses unrecoverable time — that claim was made
+    # here first and is false; the watermark catch-up plus
+    # prior_learner_backfill_days = 28 refill any gap under 28 days. The hazard
+    # is that stale priors never lose CONFIDENCE (confidence_for() is
+    # count-based, no recency term), so a paused learner keeps reporting "good"
+    # on frozen data while r1.opportunity_check withholds dispatches from it.
+    # That is a switch you may need to fix in seconds.
     #
     # Defaults TRUE, unlike mop_enabled, and this is the ONE setting in that
     # table that also fails OPEN on a read failure. The asymmetry is deliberate:

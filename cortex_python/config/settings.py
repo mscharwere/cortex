@@ -78,10 +78,17 @@ class Settings(BaseSettings):
     # it running spuriously is a handful of HA history calls, while the cost of
     # it NOT running is wall-clock time that cannot be recovered.
     #
-    # That argument is what changed the field's home. It was used here to say the
-    # switch "does not need to be hot-flippable" — but a switch whose failure
-    # mode is unrecoverable lost time is one you want to be able to fix in
-    # seconds, not at the next deploy window. Same premise, opposite conclusion.
+    # That argument is what changed the field's home — though not in the form it
+    # was first written. The claim that pausing the learner loses UNRECOVERABLE
+    # time is false: priors.py's watermark catch-up plus
+    # `prior_learner_backfill_days = 28` refill any gap under 28 days from HA
+    # recorder history.
+    #
+    # The real hazard is that stale priors never lose confidence —
+    # `confidence_for()` is count-based with no recency term — so a paused
+    # learner keeps reporting "good" on frozen data while r1.opportunity_check
+    # goes on withholding dispatches from it. That is a switch you may need to
+    # fix in seconds, which is precisely what an env var could not offer.
     #
     # `extra = "ignore"` above means a stale CORTEX_VACUUMOPS_DRY_RUN or
     # CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED left in an old .env is harmlessly

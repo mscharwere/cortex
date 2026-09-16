@@ -1365,9 +1365,9 @@ async def vacuumops_loop(settings: Settings) -> None:
             #                   prior_learner_enabled, plus read_ok.
             #                   ⚠ They do NOT all fail the same way. The two
             #                   actuation gates fail CLOSED to False; the prior
-            #                   learner fails OPEN to True because it gates a
-            #                   passive collector whose failure mode is
-            #                   unrecoverable lost sample time. See
+            #                   learner fails OPEN to True because a paused
+            #                   learner leaves STALE priors that never lose
+            #                   confidence, feeding a live withhold rule. See
             #                   HomeOpsAdapter.get_vacuumops_settings().
             try:
                 ctx, unit_dry_runs, live_settings = await build_snapshot(

@@ -461,3 +461,53 @@ class TestPriorLearnerFailsOpen:
         assert settings.mop_enabled is False
         assert settings.opportunity_actuate is False
         assert settings.prior_learner_enabled is True
+
+
+class TestFailOpenRationaleIsTheVerifiedOne:
+    """The reasoning behind `default=True` has been wrong twice. Pin the facts.
+
+    These assert against cortex's OWN code, not against prose, so the argument
+    cannot quietly stop being true while the docstring still claims it.
+    """
+
+    def test_prior_confidence_has_no_recency_term(self) -> None:
+        """⛔ THE LOAD-BEARING FACT. If confidence ever decayed with age, the
+        whole fail-open argument would collapse — a paused learner would
+        advertise its own staleness and failing closed would be harmless."""
+        import inspect
+
+        from cortex_python.modules.vacuumops.priors import confidence_for
+
+        params = list(inspect.signature(confidence_for).parameters)
+        assert params == ["native_count", "sample_count", "min_slot_samples"]
+        # No parameter carries time, a clock, or an age. Stale priors keep
+        # reporting whatever their COUNTS earned them, forever.
+        #
+        # Matched on whole words, not substrings: an earlier draft of this test
+        # searched for "at" and matched n-AT-ive_count, failing for a reason
+        # entirely unrelated to what it was checking.
+        import re
+
+        words = {w for p in params for w in re.split(r"_", p)}
+        assert not (words & {"now", "age", "aged", "at", "recency", "stale", "days", "since"})
+
+    def test_a_gap_is_recoverable_so_the_old_justification_was_false(self) -> None:
+        """The original rationale — "pausing loses unrecoverable sample time" —
+        is false, and this pins why so it cannot be written back in."""
+        from cortex_python.modules.vacuumops.config import VacuumOpsConfig
+
+        # A watermark catch-up plus a 28-day backfill window refill any gap
+        # shorter than that from HA recorder history.
+        assert VacuumOpsConfig().prior_learner_backfill_days == 28
+
+    def test_the_docstring_does_not_reinstate_the_false_claim(self) -> None:
+        """Structural, because this exact sentence has been written into this
+        codebase twice and corrected twice."""
+        import inspect
+
+        from cortex_python.adapters.homeops_adapter import HomeOpsAdapter
+
+        doc = inspect.getdoc(HomeOpsAdapter.get_vacuumops_prior_learner_enabled) or ""
+        # It may MENTION the claim in order to refute it; it may not assert it.
+        assert "is FALSE" in doc
+        assert "never lose confidence" in doc.lower() or "NEVER LOSE CONFIDENCE" in doc

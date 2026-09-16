@@ -112,7 +112,8 @@ def _bool_setting(data: dict[str, Any], key: str, *, default: bool = False) -> b
     WHICH WAY that consumer degrades: every degraded prior path there returns
     PASS, so a problem with this flag can only fail to hold a robot back, never
     release one that should have been held. "Stop on doubt" therefore protects
-    nothing here and costs sample time that can only be re-earned by waiting.
+    nothing here — and it costs something worse than the pause itself, because
+    stale priors never lose confidence and that rule keeps reading them.
     See get_vacuumops_prior_learner_enabled() for the full argument.
 
     ⚠ Do not pass `default=True` for anything that can move a robot — and check
@@ -367,39 +368,41 @@ class HomeOpsAdapter:
         the same migration `mop_enabled` and `opportunity_actuate` already made.
 
         ── Why fail OPEN, when everything else here fails closed ─────────────
-        Fail-closed exists to stop a read problem MOVING a robot. This flag
-        cannot cause that, and it is worth being precise about why, because the
-        loose version of this claim is wrong.
+        ⚠ The reason is NOT "switching it off loses unrecoverable sample time".
+        That was this docstring's original justification and it is FALSE:
+        priors.py carries a watermark catch-up plus
+        `prior_learner_backfill_days: int = 28`, so any gap shorter than 28 days
+        is recovered automatically from HA recorder history. Nothing is
+        permanently lost by pausing the learner. Do not reinstate that claim.
 
-        The flag gates WRITES: whether priors.py's learner closes out occupancy
-        slots into `cortex_occupancy_priors`. It does NOT gate reads. Those
-        priors are read unconditionally every tick by r1.opportunity_check()
-        (see OpportunityPriorSource), which CAN withhold a dispatch on them — so
-        "nothing downstream actuates" would be false.
+        The real reason is that STALE PRIORS NEVER LOSE CONFIDENCE:
 
-        What makes the direction safe is which way that consumer degrades.
-        opportunity_check holds invariant 3: every degraded or inert prior path
-        returns PASS with a reason naming the degradation
-        (`opportunity_inert:no_prior_source`,
-        `opportunity_unavailable:<reason>`). Stale or missing priors therefore
-        make the comfort gate stop WITHHOLDING — the robot cleans as it did
-        before A4. A problem with this flag can only ever fail to hold a robot
-        back; it can never release one that should have been held.
+          1. `confidence_for(native_count, sample_count, min_slot_samples)` is
+             purely COUNT-based — there is no recency term anywhere in it — so a
+             learner left off for weeks keeps reporting `confidence: "good"` on
+             frozen data, indefinitely.
+          2. The one age-aware check downstream, `_read_forward_priors`'
+             `age_days`, measures from the OLDEST native observation and gates
+             learner MATURITY (the 14-day gate). So switching the learner off
+             makes that gate MORE satisfied as time passes — the single
+             staleness-adjacent signal in the system actively rewards the
+             failure rather than catching it.
+          3. Those priors are read every tick by r1.opportunity_check(), a live
+             rule that CAN withhold a dispatch on them.
 
-        So the costs are asymmetric in the opposite direction from every gate
-        beside it, and failing closed is the genuinely worse option twice over:
+        So failing closed does not produce a quiet, obviously-degraded system.
+        It produces a CONFIDENTLY WRONG one: a live rule making comfort
+        decisions against a frozen dataset that still reads as fresh, with
+        nothing anywhere that would notice. A running learner is the only thing
+        keeping that consumer honest.
 
-          1. It costs WALL-CLOCK TIME. The learner is the one calendar-bound
-             component in the patience/pause-resume train, and an hour of
-             occupancy history missed during a HomeOps blip can never be
-             back-filled, only waited for again.
-          2. It silently freezes the dataset a LIVE gate reads. A stopped
-             learner leaves opportunity_check making comfort decisions against
-             ageing priors — confidently, until they degrade far enough to be
-             named. Running the learner is what keeps that consumer honest.
+        (Safe in the other sense too, though this is the weaker argument: every
+        degraded prior path in opportunity_check returns PASS — `r1.py:1046`,
+        `r1.py:1156` — so a read problem on this flag can only fail to HOLD A
+        ROBOT BACK, never release one that should have been held.)
 
-        Running it when it should have been off costs a few HA history calls,
-        recoverable instantly by flipping the row.
+        Running it when it should have been off costs a few HA history calls
+        every 30 minutes, recoverable instantly by flipping the row.
 
         Note this is not a weakening of the fail-closed rule; it is the same
         rule — degrade to what the system did before the setting existed —
@@ -412,6 +415,15 @@ class HomeOpsAdapter:
         only key in `cortex_vacuumops_settings` with a `fallback: true`, and
         homeOps' own `readSettingBoolFailClosed()` REFUSES to serve it for this
         exact reason.
+
+        ⚠ DEPLOY ORDER. This method reads a key that only exists after homeOps
+        migration `20260916020000` has run. Deploying THIS repo first is safe
+        but not free of consequence: until the row exists the key is simply
+        absent from the payload, `_bool_setting` resolves it to the `default=True`
+        above, and the learner runs exactly as it did before this change. So the
+        window degrades to pre-migration behaviour rather than to an outage —
+        but during it the HomeOps toggle does not yet exist, so the switch is
+        unflippable. Ship homeOps first and the window is zero.
         """
         return (await self.get_vacuumops_settings()).prior_learner_enabled
 
