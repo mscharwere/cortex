@@ -115,6 +115,10 @@ def _default_zone_info() -> dict[int, ZoneInfo]:
         # Sam 2F — sub-zone (no room sensor)
         5: ZoneInfo(label="Kids Table Area", display="2F Kids Table Area", unit_id=3, floor="2F", room_key=None),
         6: ZoneInfo(label="Daniel's Room", display="2F Daniel's Room", unit_id=3, floor="2F", room_key="daniel_room"),
+        # Iestaf's room. label is the HomeOps spelling ("Elena Room", never
+        # renamed); room_key is the HA entity stem ("iestaf_room"). The two
+        # differing is the real live state, not a fixture typo.
+        28: ZoneInfo(label="Elena Room", display="2F Elena Room", unit_id=3, floor="2F", room_key="iestaf_room"),
     }
 
 
@@ -223,6 +227,7 @@ def make_snapshot(
         "office": make_room("idle"),
         "gym": make_room("idle"),
         "daniel_room": make_room("idle"),
+        "iestaf_room": make_room("idle"),
     }
 
     zone_table = _default_zone_info()

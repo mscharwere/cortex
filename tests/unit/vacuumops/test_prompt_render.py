@@ -47,6 +47,11 @@ _JOBS = [
     (Saros1FLitterBoxJob(), 23),
     (Saros1FRoomsJob(), 20),
     (Sam2FJob(), 1),
+    # Zone 28 — Iestaf's room, added to Sam 2026-09-15. Rendered explicitly
+    # rather than trusted to zone 1's pass: the template gained a
+    # ctx.rooms.iestaf_room block in the same change, and StrictUndefined only
+    # bites on a render that actually reaches it.
+    (Sam2FJob(), 28),
 ]
 
 

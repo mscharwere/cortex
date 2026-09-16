@@ -30,6 +30,13 @@ FLOOR_ROOM_MAP: dict[str, list[str]] = {
         "carlitos_room",
         "daniel_room",
         "kids_table_area",
+        # Iestaf's room. The key is the HA entity stem, NOT the HomeOps zone
+        # label ("Elena Room") and NOT the HA area_id (still `elena_room` — only
+        # the display name was changed 2026-09-14). Every consumer of this map
+        # indexes ctx.rooms, which the synth builds as
+        # binary_sensor.{key}_occupancy_status / sensor.{key}_detected_activity,
+        # so the entity stem is the only spelling that resolves.
+        "iestaf_room",
     ],
     "3F": ["loft", "office", "gym", "family_room"],
 }
