@@ -47,15 +47,46 @@ class Settings(BaseSettings):
     homeassistant_token: str = ""  # long-lived HA token
 
     # ── VacuumOps module ───────────────────────────────────────────────────────
-    cortex_vacuumops_dry_run: bool = False  # Global override removed; per-unit DB flags control
-
-    # Occupancy prior learner kill switch (spec §4.2 / PR A1). Env-sourced rather
-    # than DB-backed, unlike mop_enabled: this switch does not gate a physical
-    # action, so it does not need to be hot-flippable without a redeploy. Defaults
-    # TRUE — the learner only writes rows to a table nothing reads yet, so the
-    # cost of it running is a handful of HA history calls every 30 minutes, while
-    # the cost of it NOT running is wall-clock time that cannot be recovered.
-    cortex_vacuumops_prior_learner_enabled: bool = True
+    # NOTE: this module now sources NOTHING from the environment. Both fields
+    # that used to live here were removed on 2026-09-16, for opposite reasons.
+    #
+    # CORTEX_VACUUMOPS_DRY_RUN — DELETED, not migrated. It was already dead: the
+    # comment that sat on it ("Global override removed; per-unit DB flags
+    # control") was accurate, and tracing the call chain confirmed it. The value
+    # reached exactly ONE line of code — a startup log field in
+    # vacuumops_loop() — while every dispatch decision read
+    # `effective_dry_run = unit_dry_runs.get(robot, True)` from the per-unit
+    # `vac_units.dry_run` column. Commit bb0d47b deliberately removed the global
+    # override because an env var silently OR-ing with a DB flag produces
+    # confusing state; this field was its leftover shell.
+    #
+    # It was considered for migration to `cortex_vacuumops_settings` alongside
+    # the prior learner and REJECTED by Carlos (2026-09-16). Migrating it would
+    # have resurrected the exact override bb0d47b removed, and put a switch
+    # labelled "dry run" in the HomeOps UI that changed nothing but a log line —
+    # a veto dressed as a switch, which is precisely the 2026-09-11 failure
+    # (a DB kill switch that was inert for seven days while the UI agreed it was
+    # on). A control that does not control is worse than no control.
+    #
+    # CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED — MIGRATED to the DB. It is now
+    # `cortex_vacuumops_settings.prior_learner_enabled`, read fresh every loop
+    # tick via HomeOpsAdapter.get_vacuumops_settings() and threaded in per-tick,
+    # exactly as mop_enabled and opportunity_actuate are. Unlike those two it
+    # fails OPEN (defaults True on any read failure) — Carlos's explicit
+    # exception, carried over from the reasoning this comment used to make for
+    # keeping it an env var: the learner gates no physical action, so the cost of
+    # it running spuriously is a handful of HA history calls, while the cost of
+    # it NOT running is wall-clock time that cannot be recovered.
+    #
+    # That argument is what changed the field's home. It was used here to say the
+    # switch "does not need to be hot-flippable" — but a switch whose failure
+    # mode is unrecoverable lost time is one you want to be able to fix in
+    # seconds, not at the next deploy window. Same premise, opposite conclusion.
+    #
+    # `extra = "ignore"` above means a stale CORTEX_VACUUMOPS_DRY_RUN or
+    # CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED left in an old .env is harmlessly
+    # ignored rather than a startup error.
+    #
     # NOTE: CORTEX_VACUUMOPS_MOP_ENABLED (the mop-cadence gate master kill switch)
     # intentionally has NO field here as of 2026-08-18. It is now a live,
     # DB-backed setting (HomeOps cortex_vacuumops_settings, GET/PATCH

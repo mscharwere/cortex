@@ -1122,21 +1122,24 @@ class TestPriorLearnerSettingsWiring:
     have to go through build_vacuumops_config(), which is what these do.
     """
 
-    def test_env_var_can_disable_the_learner(self, monkeypatch):
+    def test_the_env_var_is_retired_and_cannot_disable_the_learner(self, monkeypatch):
+        """CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED was migrated to the DB
+        (2026-09-16). A stale `=false` in an old .env must NOT still switch the
+        learner off — that would be the two-sources-of-truth state commit
+        bb0d47b removed for the per-unit dry_run flag, and the invisible-env-gate
+        state that made a DB kill switch inert for seven days on 2026-09-11.
+
+        Settings' `extra = "ignore"` means the stale entry is ignored rather
+        than a startup error, and build_vacuumops_config never reads it in.
+        """
         from cortex_python.modules.vacuumops.config import build_vacuumops_config
 
         settings = _settings_with(
             monkeypatch, CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED="false"
         )
-        assert build_vacuumops_config(settings).prior_learner_enabled is False
-
-    def test_env_var_can_enable_the_learner(self, monkeypatch):
-        from cortex_python.modules.vacuumops.config import build_vacuumops_config
-
-        settings = _settings_with(
-            monkeypatch, CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED="true"
-        )
+        # The dataclass default (True) wins — nothing wires the stale env var in.
         assert build_vacuumops_config(settings).prior_learner_enabled is True
+        assert not hasattr(settings, "cortex_vacuumops_prior_learner_enabled")
 
     def test_defaults_on_when_unset(self, monkeypatch):
         """Unlike mop_enabled, the learner defaults ON: it writes rows nothing

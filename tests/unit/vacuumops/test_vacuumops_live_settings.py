@@ -366,3 +366,98 @@ class TestSnapshotThreadsTheRecord:
         assert ctx is not None
         assert out.read_ok is False
         assert out.opportunity_actuate is False
+
+
+# ── 5. prior_learner_enabled — THE ONE FLAG THAT FAILS OPEN ──────────────────
+
+
+class TestPriorLearnerFailsOpen:
+    """⚠ The inverted flag. Read this class before adding a fourth setting.
+
+    `mop_enabled` and `opportunity_actuate` gate physical actions and fail
+    CLOSED: anything but a confirmed `true` means "do not actuate". Every test
+    above pins that.
+
+    `prior_learner_enabled` gates priors.py's rolling occupancy learner — a
+    PASSIVE collector that writes `cortex_occupancy_priors` and touches no
+    hardware. Nothing downstream of it actuates, so "stop on doubt" protects
+    nothing, and it costs the one thing this component cannot re-earn: an hour
+    of occupancy history missed during a HomeOps blip can never be back-filled,
+    only waited for again. Carlos approved the exception on 2026-09-16.
+
+    This is not a weakening of the fail-closed rule; it is the same rule —
+    degrade to what the system did before the setting existed — applied to a
+    switch whose prior behaviour was the env var's `True` default.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_false_is_honoured(self) -> None:
+        """Fail-OPEN is about AMBIGUITY, not about ignoring the operator."""
+        adapter, _ = _returning({"data": {"prior_learner_enabled": False}})
+        assert await adapter.get_vacuumops_prior_learner_enabled() is False
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_true_is_honoured(self) -> None:
+        adapter, _ = _returning({"data": {"prior_learner_enabled": True}})
+        assert await adapter.get_vacuumops_prior_learner_enabled() is True
+
+    @pytest.mark.asyncio
+    async def test_a_missing_key_fails_OPEN(self) -> None:
+        """A HomeOps that predates the row must keep the learner running."""
+        adapter, _ = _returning({"data": {"mop_enabled": True}})
+        assert await adapter.get_vacuumops_prior_learner_enabled() is True
+
+    @pytest.mark.asyncio
+    async def test_homeops_unreachable_fails_OPEN(self) -> None:
+        """The case the exception exists for: a blip must not punch a hole in a
+        sample window that only wall-clock time can refill."""
+        adapter, _ = _adapter(
+            lambda calls: _RaisingClient(ConnectionError("refused"), calls)
+        )
+        assert await adapter.get_vacuumops_prior_learner_enabled() is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", ["false", "False", 0, None, [], {"v": False}])
+    async def test_falsy_non_bool_fails_OPEN(self, value) -> None:
+        """The mirror of the fail-closed suite above. A serialization accident
+        must not switch the learner OFF any more than one may switch an
+        actuation gate ON — in both cases only a literal bool counts, and the
+        ambiguous case resolves to the safe direction FOR THAT FLAG."""
+        adapter, _ = _returning({"data": {"prior_learner_enabled": value}})
+        assert await adapter.get_vacuumops_prior_learner_enabled() is True
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_record_still_reports_the_learner_ON(self) -> None:
+        """The dataclass default matters as much as the read default: a
+        VacuumOpsLiveSettings built for a degraded path must not silently report
+        the learner as switched off."""
+        assert VacuumOpsLiveSettings(read_ok=False).prior_learner_enabled is True
+
+    @pytest.mark.asyncio
+    async def test_it_shares_the_same_single_request(self) -> None:
+        adapter, calls = _returning(
+            {
+                "data": {
+                    "mop_enabled": True,
+                    "opportunity_actuate": True,
+                    "prior_learner_enabled": False,
+                }
+            }
+        )
+        settings = await adapter.get_vacuumops_settings()
+        assert (settings.mop_enabled, settings.opportunity_actuate) == (True, True)
+        assert settings.prior_learner_enabled is False
+        assert calls == [_SETTINGS_PATH], "all three flags must share ONE round trip"
+
+    @pytest.mark.asyncio
+    async def test_the_three_flags_fail_in_their_own_directions_together(self) -> None:
+        """⛔ THE ONE THAT MATTERS for this class. On a totally empty payload the
+        two actuation gates go OFF and the collector stays ON, from a single
+        read. If this ever reports all-three-the-same, someone has flattened the
+        asymmetry and either a robot can move on a bad read, or the learner
+        stops on a good one."""
+        adapter, _ = _returning({"data": {}})
+        settings = await adapter.get_vacuumops_settings()
+        assert settings.mop_enabled is False
+        assert settings.opportunity_actuate is False
+        assert settings.prior_learner_enabled is True

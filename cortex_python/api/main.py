@@ -44,7 +44,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         vacuumops_loop(settings),
         name="vacuumops_loop",
     )
-    log.info("vacuumops_loop.started", dry_run=settings.cortex_vacuumops_dry_run)
+    # `dry_run` dropped from this line (2026-09-16): CORTEX_VACUUMOPS_DRY_RUN was
+    # deleted, and this was one of only two places its value ever reached — both
+    # log fields, neither a decision. Per-unit dry run (`vac_units.dry_run`) is
+    # the sole control and is logged per-dispatch, where it actually applies.
+    # vacuumops_loop() emits its own richer `vacuumops_loop.started` with each
+    # live switch's provenance.
+    log.info("vacuumops_loop.started")
 
     yield  # application is running
 
