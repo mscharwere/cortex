@@ -48,9 +48,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # deleted, and this was one of only two places its value ever reached — both
     # log fields, neither a decision. Per-unit dry run (`vac_units.dry_run`) is
     # the sole control and is logged per-dispatch, where it actually applies.
-    # vacuumops_loop() emits its own richer `vacuumops_loop.started` with each
-    # live switch's provenance.
-    log.info("vacuumops_loop.started")
+    # No log line here at all: vacuumops_loop() emits its own richer
+    # `vacuumops_loop.started` with each live switch's provenance, so this one
+    # was a bare duplicate of that event name carrying strictly less. Two
+    # identical event names with different payloads is worse than one — it makes
+    # a log search for the boot state return the emptier of the two first.
 
     yield  # application is running
 

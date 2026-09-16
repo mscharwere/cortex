@@ -1270,11 +1270,13 @@ async def vacuumops_loop(settings: Settings) -> None:
     )
     # ⚠ Read the LIVE flag before the one-off startup backfill.
     #
-    # `vacuumops_cfg.prior_learner_enabled` is only the dataclass default now
-    # (2026-09-16) — the real value is a DB row. Gating this on the static field
-    # would mean a learner Carlos had deliberately switched off still ran a full
-    # backfill on every container restart, which is exactly the "the UI says off
-    # and it happens anyway" shape this migration exists to remove.
+    # There is no `vacuumops_cfg.prior_learner_enabled` to gate on — the field was
+    # deleted from VacuumOpsConfig (2026-09-16) once it had zero readers, for the
+    # same reason `dry_run` was. The value lives only on the live settings
+    # record. Gating a startup backfill on a static default would mean a learner
+    # deliberately switched off still ran a full backfill on every container
+    # restart: the "the UI says off and it happens anyway" shape this migration
+    # exists to remove.
     #
     # A dedicated call is fine HERE because this is once per process, not per
     # tick. It fails OPEN to True, like every read of this flag.

@@ -257,42 +257,59 @@ class HomeOpsAdapter:
             return scores, zone_info, unit_dry_runs
 
     async def get_vacuumops_settings(self) -> VacuumOpsLiveSettings:
-        """Fetch every live, DB-backed VacuumOps kill switch in ONE round trip.
+        """Fetch every live, DB-backed VacuumOps switch in ONE round trip.
 
         GET /api/cortex/vacuumops-settings
         Response: { data: {
-            mop_enabled,          mop_enabled_updated_at,          mop_enabled_updated_by,
-            opportunity_actuate,  opportunity_actuate_updated_at,  opportunity_actuate_updated_by
+            mop_enabled,            mop_enabled_..._updated_at / _updated_by,
+            opportunity_actuate,    opportunity_actuate_... ,
+            prior_learner_enabled,  prior_learner_enabled_... ,
+            …plus the homeOps-side disruption keys, which CORTEX ignores
         } }
 
-        ONE CALL, NOT ONE PER FLAG. HomeOps serves both switches from the same
-        row of `cortex_vacuumops_settings`, and the loop needs both on the same
-        tick, so reading them separately would double the per-tick request count
-        for zero added freshness — and would additionally let the two flags come
-        from two different instants, which is a state the DB row cannot actually
-        be in. `get_vacuumops_mop_enabled()` and
-        `get_vacuumops_opportunity_actuate()` below are thin wrappers over this
-        method, kept for callers that want exactly one flag; the loop's per-tick
-        path calls this one.
+        ONE CALL, NOT ONE PER FLAG. HomeOps serves all of them from the same
+        table, and the loop needs them on the same tick, so reading them
+        separately would multiply the per-tick request count for zero added
+        freshness — and would let the flags come from different instants, a
+        state the table cannot actually be in. The three single-flag wrappers
+        below are thin wrappers over this method, kept for callers that want
+        exactly one; the loop's per-tick path calls this one.
 
         Called fresh every loop tick by vacuumops_synth.build_snapshot() — no
         cache/TTL on this side. The adaptive tick interval (60-300 s, see
-        loop.next_interval) is the only staleness bound, matching the existing
-        unit-level dry_run read path (get_zone_data(), same adapter, uncached
-        too).
+        loop.next_interval) is the only staleness bound.
 
-        Fail-CLOSED on every ambiguity, per flag independently:
-          - Network error / timeout / non-2xx status   -> all False, read_ok=False
-          - Malformed JSON / missing "data" object      -> all False, read_ok=False
-          - A key absent or not a bool                  -> THAT flag False, read_ok=True
-          - Confirmed True or False                     -> that value, no log noise
+        ⚠ FAIL DIRECTION IS PER FLAG, AND THEY ARE NOT ALL THE SAME.
+        This docstring asserted "fail-CLOSED on every ambiguity, per flag
+        independently" and then said so three more times in a bullet list. The
+        "per flag independently" half was right; "closed" was not, for one of
+        them, on every one of those paths:
 
-        Note the third case carefully: a HomeOps that answers but predates the
-        `opportunity_actuate` column is NOT a degraded read. We heard back, the
-        answer is "this switch does not exist here", and the fail-closed
-        interpretation of that is a confirmed off — so read_ok stays True. Only
-        "we never got an answer" clears read_ok. See VacuumOpsLiveSettings for
-        why the distinction is load-bearing rather than cosmetic.
+          ACTUATION GATES — `mop_enabled`, `opportunity_actuate` — fail CLOSED.
+          They decide whether software wets a floor or withholds a dispatch, so
+          anything other than a confirmed `true` means "do not actuate".
+
+          `prior_learner_enabled` fails OPEN. It gates a recorder, not an
+          actuator, and stale priors never lose confidence — a silently paused
+          learner keeps feeding "good" frozen data to a live withhold rule. See
+          get_vacuumops_prior_learner_enabled() for the full argument.
+
+        So, by case:
+          - Network error / timeout / non-2xx  -> gates False, learner True,
+                                                  read_ok=False
+          - Malformed JSON / missing "data"    -> gates False, learner True,
+                                                  read_ok=False
+          - A key absent or not a bool         -> THAT flag to ITS OWN default
+                                                  (gate False, learner True),
+                                                  read_ok=True
+          - Confirmed True or False            -> that value, no log noise
+
+        Note the third case carefully: a HomeOps that answers but predates a
+        column is NOT a degraded read. We heard back, the answer is "this switch
+        does not exist here", and each flag's default interpretation of that is
+        its own documented one — so read_ok stays True. Only "we never got an
+        answer" clears read_ok. See VacuumOpsLiveSettings for why the
+        distinction is load-bearing rather than cosmetic.
 
         Never raises — a HomeOps outage on this read must not take down the tick
         (zone scores are the only hard dependency; see build_snapshot's §8.5
