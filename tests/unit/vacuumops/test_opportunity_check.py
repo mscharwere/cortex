@@ -1349,10 +1349,28 @@ class TestPerJobFlags:
         # `m.cortex_vacuumops_dry_run = False` for a field Settings does not
         # have. Recommending them would reproduce the bug one test over.
         #
-        # The thing that actually fails loud is a REAL instance:
-        # `Settings(DATABASE_URL=..., REDIS_URL=..., CORTEX_SECRET_KEY=...)`
-        # raises ValidationError on assignment to an unknown field. If a future
-        # test needs to set settings, build one of those.
+        # The thing that actually fails loud is a REAL instance — but not the
+        # one an earlier version of this comment gave, which did not run:
+        # `Settings(DATABASE_URL=...)` raises "database_url Field required",
+        # because `case_sensitive` governs ENV-VAR resolution, not __init__
+        # kwargs, and `extra="ignore"` then silently drops the uppercase ones.
+        # The claimed exception type was wrong too: assignment to an unknown
+        # field raises plain ValueError, not ValidationError, because
+        # `validate_assignment` is not enabled.
+        #
+        # Use the pattern this suite already has — `_settings_with(monkeypatch)`
+        # in test_mop.py, which sets the env vars and builds
+        # `Settings(_env_file=None)`. Verified end to end before writing it down:
+        #
+        #     s = _settings_with(monkeypatch)
+        #     s.cortex_api_key = "x"                    # real field: fine
+        #     with pytest.raises(ValueError):
+        #         s.cortex_vacuumops_dry_run = False    # retired field: raises
+        #
+        # ⚠ That verification is the point, not a flourish. This comment has now
+        # been wrong three times — "read-only stand-in", "use spec= instead",
+        # and an example that did not execute — each time because the claim
+        # sounded right and nobody ran it. Run the next one.
         settings = MagicMock(spec_set=Settings)
         assert build_vacuumops_config(settings).opportunity_actuate is False
 

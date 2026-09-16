@@ -471,11 +471,19 @@ async def build_snapshot(
         unit_dry_runs is dict[robot_name → dry_run bool]. robot_name is the
           lowercased unit nickname (e.g. "ethan", "sam"). Consumed by the loop
           to compute per-robot effective dry_run.
-        live_settings is every live, DB-backed kill switch — `mop_enabled`
-          (mop-cadence gate) and `opportunity_actuate` (predictive patience) —
-          plus `read_ok`, read together in ONE HomeOps call. Every flag is
-          already fail-closed to False by HomeOpsAdapter.get_vacuumops_settings()
-          on any read problem, so there is nothing further to degrade here.
+        live_settings is every live, DB-backed switch — `mop_enabled`
+          (mop-cadence gate), `opportunity_actuate` (predictive patience) and
+          `prior_learner_enabled` (occupancy learner) — plus `read_ok`, read
+          together in ONE HomeOps call.
+
+          ⚠ They do NOT all degrade the same way, and this docstring said they
+          did ("every flag is already fail-closed to False"). The two ACTUATION
+          gates fail closed to False; `prior_learner_enabled` fails OPEN to True,
+          because it gates a recorder and stale priors never lose confidence.
+          HomeOpsAdapter.get_vacuumops_settings() applies each flag's own
+          direction, so there is nothing further to degrade here — but "already
+          safe" means "already at each flag's documented default", not "already
+          False".
       Neither is stored on ContextSnapshot (avoids coupling schema to
       dispatch/module-config concerns) — both are consumed by the loop only.
 
@@ -485,6 +493,7 @@ async def build_snapshot(
     positional booleans destructured at the call site — the shape where adding
     the next switch silently swaps two flags at one of them. One flag per field,
     named, and the next one costs neither a tuple slot nor a second HTTP call.
+    `prior_learner_enabled` was that next one, and it cost exactly a field.
     """
     now = datetime.now(tz=UTC)
 
@@ -504,21 +513,26 @@ async def build_snapshot(
     # get_zone_metadata() logs and returns {} on failure.
     zone_metadata = await homeops_adapter.get_zone_metadata()
 
-    # ── Live kill switches (HomeOps, DB-backed) ───────────────────────────────
-    # ONE call for BOTH `mop_enabled` (mop-cadence gate) and
-    # `opportunity_actuate` (predictive patience). They live in the same
-    # `cortex_vacuumops_settings` row and are both needed on the same tick, so a
-    # request per flag would double the per-tick call count for no extra
-    # freshness — and would let two flags that physically cannot disagree in the
-    # DB arrive from two different instants.
+    # ── Live switches (HomeOps, DB-backed) ────────────────────────────────────
+    # ONE call for ALL THREE: `mop_enabled` (mop-cadence gate),
+    # `opportunity_actuate` (predictive patience) and `prior_learner_enabled`
+    # (occupancy learner). They live in the same `cortex_vacuumops_settings`
+    # table and are all needed on the same tick, so a request per flag would
+    # TRIPLE the per-tick call count for no extra freshness — and would let
+    # flags that physically cannot disagree in the DB arrive from three
+    # different instants.
     #
     # Live read every tick: mop_enabled replaced the old
     # CORTEX_VACUUMOPS_MOP_ENABLED env var and opportunity_actuate replaced a
     # static field on the job descriptors; both only ever took effect at process
     # start before. Failure does NOT skip the tick (same reasoning as
-    # zone_metadata above); get_vacuumops_settings() fails closed to False on
-    # every unreachable/malformed/missing-field case, so there is nothing
-    # further to degrade here — the record is already safe. It also reports
+    # zone_metadata above); get_vacuumops_settings() resolves every
+    # unreachable/malformed/missing-field case to each flag's OWN documented
+    # default — False for the two actuation gates, True for the learner — so
+    # there is nothing further to degrade here. ⚠ This said "fails closed to
+    # False on every case", which stopped being true when the learner joined:
+    # the same sentence was corrected in the adapter's own docstring and
+    # survived here, in the file that CALLS it. It also reports
     # `read_ok`, which is how the opportunity rule distinguishes "switched off"
     # from "could not ask".
     live_settings = await homeops_adapter.get_vacuumops_settings()
