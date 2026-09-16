@@ -130,11 +130,18 @@ class VacuumOpsConfig:
     # ── Rolling occupancy prior learner (priors.py, PR A1) ───────────────────
     # Spec: cortex_vacuum_patience_and_pause_resume_implementation_spec.md §4.2 + §7
     #
-    # The learner writes cortex_occupancy_priors and NOTHING reads it yet — PR A2's
-    # opportunity() is its only consumer. A1 ships alone and first because the
-    # learner's sample clock is the only calendar-bound item in the whole
-    # patience/pause-resume train: every other PR is engineering time, this one is
-    # wall-clock time, so it has to start accruing before the rest is built.
+    # The learner writes cortex_occupancy_priors. A1 shipped alone and first
+    # because the learner's sample clock is the only calendar-bound item in the
+    # whole patience/pause-resume train: every other PR is engineering time,
+    # this one is wall-clock time, so it had to start accruing before the rest
+    # was built.
+    #
+    # ⚠ This block used to end "and NOTHING reads it yet — PR A2's opportunity()
+    # is its only consumer." That stopped being true when A2/A3 shipped and was
+    # never updated: r1.opportunity_check() reads these priors on every tick via
+    # OpportunityPriorSource, and can withhold a dispatch on them. Corrected
+    # 2026-09-16. (Point-in-time note written once and never re-checked — the
+    # "logged once ≠ tracked" shape, in a comment rather than a memory file.)
 
     # Master switch. NOT env-sourced as of 2026-09-16 — it is a live, DB-backed
     # setting (HomeOps `cortex_vacuumops_settings.prior_learner_enabled`,

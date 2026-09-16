@@ -4,8 +4,11 @@ Calls:
   GET  /api/vacuum/units             — parse zone scores from data[].zones[]
   POST /api/vacuum/trigger           — dispatch a mission
   POST /api/decisions/vacuumops      — log a decision entry (fire-and-forget)
-  GET  /api/cortex/vacuumops-settings — live kill switches, all fail-closed:
-       mop_enabled (mop-cadence gate) + opportunity_actuate (predictive patience)
+  GET  /api/cortex/vacuumops-settings — live switches, read in one call:
+       mop_enabled (mop-cadence gate) and opportunity_actuate (predictive
+       patience), both FAIL-CLOSED; prior_learner_enabled (occupancy learner),
+       which FAILS OPEN — see _bool_setting and
+       get_vacuumops_prior_learner_enabled()
 
 All calls use:
   Authorization: Bearer {settings.cortex_api_key}
@@ -103,13 +106,18 @@ def _bool_setting(data: dict[str, Any], key: str, *, default: bool = False) -> b
     helper refuses truthy coercion.
 
     The parameter exists for the ONE switch that is not an actuation gate —
-    `prior_learner_enabled`, a passive occupancy collector that writes a table
-    and touches no hardware. There is no robot on that path, so "stop on doubt"
-    protects nothing and costs sample time that can only be re-earned by
-    waiting. See its call site.
+    `prior_learner_enabled`, which gates WRITES by the occupancy learner. Its
+    output IS read by a rule that can withhold a dispatch
+    (r1.opportunity_check), so the test is not "does anything consume it" but
+    WHICH WAY that consumer degrades: every degraded prior path there returns
+    PASS, so a problem with this flag can only fail to hold a robot back, never
+    release one that should have been held. "Stop on doubt" therefore protects
+    nothing here and costs sample time that can only be re-earned by waiting.
+    See get_vacuumops_prior_learner_enabled() for the full argument.
 
-    ⚠ Do not pass `default=True` for anything that can move a robot. If you have
-    to think about whether a switch actuates, it does.
+    ⚠ Do not pass `default=True` for anything that can move a robot — and check
+    the DEGRADED direction of every consumer before deciding it cannot. If you
+    have to think about whether a switch actuates, it does.
     """
     value = data.get(key)
     if not isinstance(value, bool):
@@ -359,19 +367,39 @@ class HomeOpsAdapter:
         the same migration `mop_enabled` and `opportunity_actuate` already made.
 
         ── Why fail OPEN, when everything else here fails closed ─────────────
-        Fail-closed exists to stop a read problem moving a robot. This flag
-        cannot move a robot: it gates priors.py's rolling occupancy learner, a
-        passive collector that writes `cortex_occupancy_priors` and issues a
-        handful of HA history calls. Nothing downstream of it actuates.
+        Fail-closed exists to stop a read problem MOVING a robot. This flag
+        cannot cause that, and it is worth being precise about why, because the
+        loose version of this claim is wrong.
+
+        The flag gates WRITES: whether priors.py's learner closes out occupancy
+        slots into `cortex_occupancy_priors`. It does NOT gate reads. Those
+        priors are read unconditionally every tick by r1.opportunity_check()
+        (see OpportunityPriorSource), which CAN withhold a dispatch on them — so
+        "nothing downstream actuates" would be false.
+
+        What makes the direction safe is which way that consumer degrades.
+        opportunity_check holds invariant 3: every degraded or inert prior path
+        returns PASS with a reason naming the degradation
+        (`opportunity_inert:no_prior_source`,
+        `opportunity_unavailable:<reason>`). Stale or missing priors therefore
+        make the comfort gate stop WITHHOLDING — the robot cleans as it did
+        before A4. A problem with this flag can only ever fail to hold a robot
+        back; it can never release one that should have been held.
 
         So the costs are asymmetric in the opposite direction from every gate
-        beside it. Running the learner when it should have been off costs a few
-        HTTP calls, recoverable instantly by flipping the row. NOT running it
-        costs WALL-CLOCK TIME — the learner is the one calendar-bound component
-        in the patience/pause-resume train, and an hour of occupancy history
-        missed during a HomeOps blip can never be back-filled, only waited for
-        again. A gate that silently punched holes in the sample window on every
-        network hiccup would corrupt the dataset it exists to build.
+        beside it, and failing closed is the genuinely worse option twice over:
+
+          1. It costs WALL-CLOCK TIME. The learner is the one calendar-bound
+             component in the patience/pause-resume train, and an hour of
+             occupancy history missed during a HomeOps blip can never be
+             back-filled, only waited for again.
+          2. It silently freezes the dataset a LIVE gate reads. A stopped
+             learner leaves opportunity_check making comfort decisions against
+             ageing priors — confidently, until they degrade far enough to be
+             named. Running the learner is what keeps that consumer honest.
+
+        Running it when it should have been off costs a few HA history calls,
+        recoverable instantly by flipping the row.
 
         Note this is not a weakening of the fail-closed rule; it is the same
         rule — degrade to what the system did before the setting existed —
