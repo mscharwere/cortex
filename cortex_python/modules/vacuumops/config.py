@@ -143,40 +143,34 @@ class VacuumOpsConfig:
     # 2026-09-16. (Point-in-time note written once and never re-checked — the
     # "logged once ≠ tracked" shape, in a comment rather than a memory file.)
 
-    # Master switch. NOT env-sourced as of 2026-09-16 — it is a live, DB-backed
-    # setting (HomeOps `cortex_vacuumops_settings.prior_learner_enabled`,
-    # GET/PATCH /api/cortex/vacuumops-settings) that loop.py reads fresh every
-    # tick via HomeOpsAdapter.get_vacuumops_settings() and threads in per-tick
-    # with `dataclasses.replace(...)`, exactly as mop_enabled and
-    # opportunity_actuate do. build_vacuumops_config() below deliberately does
-    # NOT set this field; the dataclass default is only the fallback for direct
-    # construction (tests, or a path that never receives a live value).
+    # ⚠ THERE IS NO `prior_learner_enabled` FIELD HERE ANY MORE (2026-09-16).
     #
-    # It was CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED until then, and the reason it
-    # moved is the same argument that used to justify keeping it an env var:
-    # settings.py said it "does not need to be hot-flippable" because it gates no
-    # physical action.
+    # The switch is real and live — HomeOps
+    # `cortex_vacuumops_settings.prior_learner_enabled`, GET/PATCH
+    # /api/cortex/vacuumops-settings — but it does not belong on THIS dataclass,
+    # and a field here would be worse than no field.
     #
-    # ⚠ NOT because pausing it loses unrecoverable time — that claim was made
-    # here first and is false; the watermark catch-up plus
-    # prior_learner_backfill_days = 28 refill any gap under 28 days. The hazard
-    # is that stale priors never lose CONFIDENCE (confidence_for() is
-    # count-based, no recency term), so a paused learner keeps reporting "good"
-    # on frozen data while r1.opportunity_check withholds dispatches from it.
-    # That is a switch you may need to fix in seconds.
+    # It briefly existed, and reached ZERO readers. Nothing ever consumed
+    # `VacuumOpsConfig.prior_learner_enabled`: loop.py takes the live value off
+    # `VacuumOpsLiveSettings` and carries it in `live_prior_learner_enabled`,
+    # which is what both the startup backfill and the per-tick slot close-out
+    # actually branch on.
     #
-    # Defaults TRUE, unlike mop_enabled, and this is the ONE setting in that
-    # table that also fails OPEN on a read failure. The asymmetry is deliberate:
-    # mop_enabled actuates a physical wet pass on real floors and so is opt-in
-    # and fail-closed; the learner writes rows to a table and touches no
-    # hardware. Its worst failure mode when ON is a wasted HA history call every
-    # 30 minutes; its worst failure mode when OFF is priors that FREEZE WITHOUT
-    # LOSING CONFIDENCE — confidence_for() is count-based, so they keep reporting
-    # "good" — while r1.opportunity_check goes on withholding dispatches from
-    # them. (The gap itself is recoverable: 28-day backfill. See the refutation
-    # 13 lines above; this paraphrase of the false claim survived two purges.)
-    # See HomeOpsAdapter.get_vacuumops_prior_learner_enabled() for the argument.
-    prior_learner_enabled: bool = True
+    # `config_for_tick`'s own rule is "EVERY LIVE FLAG BELONGS HERE… otherwise
+    # the DB row will exist, the operator will flip it, and nothing will happen."
+    # That rule exists to protect flags something READS. Mapping a flag nothing
+    # reads would satisfy the letter of it while producing exactly the state it
+    # warns about: a field that looks wired and controls nothing.
+    #
+    # So it is deleted, for the same reason and by the same argument that
+    # deleted `dry_run` earlier in this very change — "a control that does not
+    # control is worse than no control". `dry_run` reached one line (a log
+    # field); this reached none. Treating them differently would have meant
+    # applying that argument only where it was discovered rather than where it
+    # is true.
+    #
+    # The live value's home is `VacuumOpsLiveSettings.prior_learner_enabled`
+    # (fail-OPEN — see HomeOpsAdapter.get_vacuumops_prior_learner_enabled()).
 
     # 30-minute slots => 48/day, 336/week/entity. CORTEX keeps its own table
     # precisely so it is not bound by HA's non-configurable
@@ -393,17 +387,20 @@ def build_vacuumops_config(settings: Settings) -> VacuumOpsConfig:
     it is meant to be operator-controlled, wire it in this function and assert
     it in tests/unit/vacuumops/test_mop.py::TestSettingsWiring.
 
-    mop_enabled, opportunity_actuate and prior_learner_enabled are intentionally
-    NOT wired here — none of them is env-sourced. See their field docstrings
-    above for the live DB-backed mechanism; the per-tick wiring lives in
-    loop.vacuumops_loop(), and its regression coverage lives in
-    TestLivePerTickWiring (test_mop.py), TestLiveActuateWiring
-    (test_opportunity_check.py) and TestLivePriorLearnerWiring
-    (test_prior_learner.py).
+    mop_enabled and opportunity_actuate are intentionally NOT wired here — they
+    are not env-sourced. See their field docstrings above for the live DB-backed
+    mechanism; the per-tick wiring lives in loop.vacuumops_loop(), and its
+    regression coverage lives in TestLivePerTickWiring (test_mop.py) and
+    TestLiveActuateWiring (test_opportunity_check.py).
 
-    The dataclass defaults for all three are the fallback for direct
-    construction only (tests, or a code path that never receives a live value)
-    and are never the values the running loop actually dispatches on.
+    `prior_learner_enabled` is not here either, and has no field on this
+    dataclass at all — see the note where it used to be. Its live value lives on
+    VacuumOpsLiveSettings; its coverage is TestPriorLearnerFailsOpen in
+    tests/unit/vacuumops/test_vacuumops_live_settings.py.
+
+    The dataclass defaults for both are the fallback for direct construction
+    only (tests, or a code path that never receives a live value) and are never
+    the values the running loop actually dispatches on.
 
     ⚠ As of 2026-09-16 this function sources NOTHING from the environment, so it
     returns a bare default config. It is deliberately KEPT rather than deleted:

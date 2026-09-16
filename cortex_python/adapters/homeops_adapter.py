@@ -39,7 +39,10 @@ from cortex_python.modules.vacuumops.schemas import DecisionEntry, ZoneInfo, Zon
 # that does not match is not an error anywhere — ctx.rooms.get() simply returns
 # None and the lookup degrades silently. "Master Bathroom" carried "master_bath"
 # against a tracked room named "master_bathroom" for months on exactly that basis.
-# test_homeops_adapter.py pins the two lists against each other.
+# tests/unit/vacuumops/test_homeops_adapter_zone_meta.py pins the two lists
+# against each other. (The old pointer named test_homeops_adapter.py, which has
+# never existed — a dangling reference found while auditing the ones this change
+# introduced. Same class of defect, so fixed rather than stepped over.)
 _ZONE_LABEL_TO_ROOM_KEY: dict[str, str | None] = {
     # Ethan 3F
     "Litter Box": None,

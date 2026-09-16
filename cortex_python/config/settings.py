@@ -69,9 +69,19 @@ class Settings(BaseSettings):
     # on). A control that does not control is worse than no control.
     #
     # CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED — MIGRATED to the DB. It is now
-    # `cortex_vacuumops_settings.prior_learner_enabled`, read fresh every loop
-    # tick via HomeOpsAdapter.get_vacuumops_settings() and threaded in per-tick,
-    # exactly as mop_enabled and opportunity_actuate are. Unlike those two it
+    # `cortex_vacuumops_settings.prior_learner_enabled`, read via
+    # HomeOpsAdapter.get_vacuumops_settings().
+    #
+    # ⚠ NOT "fresh every tick, exactly as mop_enabled and opportunity_actuate
+    # are" — that was claimed here and is false on both halves. The startup
+    # backfill takes a dedicated live read; the per-tick slot close-out uses the
+    # PREVIOUS tick's value, carried forward deliberately because that block runs
+    # BEFORE build_snapshot() so a degraded HomeOps cannot stall a
+    # calendar-bound sample clock. There is no `dataclasses.replace` for it
+    # either — it has no VacuumOpsConfig field at all. loop.py's own comment at
+    # the close-out gate has the full reasoning.
+    #
+    # Unlike the other two it
     # fails OPEN (defaults True on any read failure) — Carlos's explicit
     # exception: the learner gates no physical action, so the cost of it running
     # spuriously is a handful of HA history calls, while the cost of it NOT
