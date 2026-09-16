@@ -140,7 +140,12 @@ def _returning(payload):
     return _adapter(lambda calls: _CountingClient(payload, calls))
 
 
-# ── 1. Fail-closed, per flag ─────────────────────────────────────────────────
+# ── 1. Each flag degrades to its OWN default, per flag ───────────────────────
+#
+# These cases all cover the two ACTUATION gates, whose default is False. The
+# header said "Fail-closed, per flag" — the exact phrase the module docstring
+# above now disavows, because it is wrong for the third flag. §5 covers that
+# one, and it fails OPEN.
 
 
 class TestOpportunityActuateFailsClosed:
@@ -212,21 +217,26 @@ class TestOpportunityActuateFailsClosed:
         assert await adapter.get_vacuumops_opportunity_actuate() is False
 
 
-# ── 2. One call for both flags ───────────────────────────────────────────────
+# ── 2. One call for ALL the flags ────────────────────────────────────────────
+#
+# "both" was accurate when there were two. The cases below still exercise the
+# pair, because that is what they were written for; §5 pins the same property
+# across all three. The HEADER has to describe the contract, not the fixtures
+# that happened to be written first.
 
 
 class TestFlagsShareOneRequest:
     @pytest.mark.asyncio
-    async def test_both_flags_come_from_a_single_get(self) -> None:
+    async def test_the_gate_flags_come_from_a_single_get(self) -> None:
         adapter, calls = _returning(
             {"data": {"mop_enabled": True, "opportunity_actuate": True}}
         )
         settings = await adapter.get_vacuumops_settings()
         assert (settings.mop_enabled, settings.opportunity_actuate) == (True, True)
-        assert calls == [_SETTINGS_PATH], "both flags must share ONE round trip"
+        assert calls == [_SETTINGS_PATH], "every flag must share ONE round trip"
 
     @pytest.mark.asyncio
-    async def test_the_two_flags_are_independent(self) -> None:
+    async def test_the_gate_flags_are_independent(self) -> None:
         """Sharing a request must not make them share a value."""
         adapter, _ = _returning(
             {"data": {"mop_enabled": True, "opportunity_actuate": False}}
