@@ -1142,9 +1142,12 @@ class TestPriorLearnerSettingsWiring:
         assert not hasattr(settings, "cortex_vacuumops_prior_learner_enabled")
 
     def test_defaults_on_when_unset(self, monkeypatch):
-        """Unlike mop_enabled, the learner defaults ON: it writes rows nothing
-        reads, so the cost of running it is a few HA calls per half hour, while
-        the cost of NOT running it is wall-clock time that cannot be recovered."""
+        """Unlike mop_enabled, the learner defaults ON.
+
+        Running it costs a few HA calls per half hour. NOT running it freezes
+        the priors WITHOUT dropping their confidence — confidence_for() is
+        count-based — while r1.opportunity_check keeps withholding dispatches
+        from them. (Not "lost time": gaps under 28 days are back-filled.)"""
         from cortex_python.modules.vacuumops.config import build_vacuumops_config
 
         monkeypatch.delenv("CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED", raising=False)

@@ -170,9 +170,12 @@ class VacuumOpsConfig:
     # mop_enabled actuates a physical wet pass on real floors and so is opt-in
     # and fail-closed; the learner writes rows to a table and touches no
     # hardware. Its worst failure mode when ON is a wasted HA history call every
-    # 30 minutes; its worst failure mode when OFF is a hole in the sample window
-    # that only wall-clock time can refill. See
-    # HomeOpsAdapter.get_vacuumops_prior_learner_enabled() for the full argument.
+    # 30 minutes; its worst failure mode when OFF is priors that FREEZE WITHOUT
+    # LOSING CONFIDENCE — confidence_for() is count-based, so they keep reporting
+    # "good" — while r1.opportunity_check goes on withholding dispatches from
+    # them. (The gap itself is recoverable: 28-day backfill. See the refutation
+    # 13 lines above; this paraphrase of the false claim survived two purges.)
+    # See HomeOpsAdapter.get_vacuumops_prior_learner_enabled() for the argument.
     prior_learner_enabled: bool = True
 
     # 30-minute slots => 48/day, 336/week/entity. CORTEX keeps its own table

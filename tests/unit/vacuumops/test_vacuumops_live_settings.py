@@ -378,12 +378,17 @@ class TestPriorLearnerFailsOpen:
     CLOSED: anything but a confirmed `true` means "do not actuate". Every test
     above pins that.
 
-    `prior_learner_enabled` gates priors.py's rolling occupancy learner — a
-    PASSIVE collector that writes `cortex_occupancy_priors` and touches no
-    hardware. Nothing downstream of it actuates, so "stop on doubt" protects
-    nothing, and it costs the one thing this component cannot re-earn: an hour
-    of occupancy history missed during a HomeOps blip can never be back-filled,
-    only waited for again. Carlos approved the exception on 2026-09-16.
+    `prior_learner_enabled` gates WRITES by priors.py's rolling occupancy
+    learner. Its output IS read by a rule that can withhold a dispatch
+    (r1.opportunity_check), so the test is not "does anything consume it" but
+    which way that consumer degrades — every degraded prior path there returns
+    PASS, so a problem here can only fail to hold a robot back.
+
+    The reason to fail OPEN is that stale priors NEVER LOSE CONFIDENCE:
+    confidence_for() is count-based with no recency term, so a paused learner
+    keeps reporting "good" on frozen data while that live rule reads it. The GAP
+    is recoverable (28-day backfill) — "lost time" was the original rationale
+    and it is false. Carlos approved the exception on 2026-09-16.
 
     This is not a weakening of the fail-closed rule; it is the same rule —
     degrade to what the system did before the setting existed — applied to a
@@ -409,8 +414,10 @@ class TestPriorLearnerFailsOpen:
 
     @pytest.mark.asyncio
     async def test_homeops_unreachable_fails_OPEN(self) -> None:
-        """The case the exception exists for: a blip must not punch a hole in a
-        sample window that only wall-clock time can refill."""
+        """The case the exception exists for: a blip must not silently PAUSE the
+        learner, leaving frozen priors that still report confidence:"good" to a
+        live withhold rule. (The gap itself would be back-filled; that is not
+        the hazard.)"""
         adapter, _ = _adapter(
             lambda calls: _RaisingClient(ConnectionError("refused"), calls)
         )

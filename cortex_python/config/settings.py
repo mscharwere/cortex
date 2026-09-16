@@ -73,10 +73,10 @@ class Settings(BaseSettings):
     # tick via HomeOpsAdapter.get_vacuumops_settings() and threaded in per-tick,
     # exactly as mop_enabled and opportunity_actuate are. Unlike those two it
     # fails OPEN (defaults True on any read failure) — Carlos's explicit
-    # exception, carried over from the reasoning this comment used to make for
-    # keeping it an env var: the learner gates no physical action, so the cost of
-    # it running spuriously is a handful of HA history calls, while the cost of
-    # it NOT running is wall-clock time that cannot be recovered.
+    # exception: the learner gates no physical action, so the cost of it running
+    # spuriously is a handful of HA history calls, while the cost of it NOT
+    # running is that its priors FREEZE WITHOUT LOSING CONFIDENCE and a live
+    # withhold rule keeps reading them.
     #
     # That argument is what changed the field's home — though not in the form it
     # was first written. The claim that pausing the learner loses UNRECOVERABLE
