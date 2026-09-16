@@ -295,8 +295,9 @@ class VacuumOpsConfig:
     # (r1.opportunity_check). LIVE AND DB-BACKED, exactly like mop_enabled above
     # — same HomeOps table (`cortex_vacuumops_settings`), same endpoint
     # (GET/PATCH /api/cortex/vacuumops-settings), same single per-tick read
-    # (HomeOpsAdapter.get_vacuumops_settings() returns both flags in one round
-    # trip), same `dataclasses.replace()` threading in loop.vacuumops_loop().
+    # (HomeOpsAdapter.get_vacuumops_settings() returns all three flags, plus
+    # read_ok, in one round trip), same `dataclasses.replace()` threading in
+    # loop.vacuumops_loop().
     # NOT env-sourced, and deliberately NOT set by build_vacuumops_config().
     #
     # WHAT MOVED, AND WHY IT MOVED HERE RATHER THAN STAYING ON THE JOB.

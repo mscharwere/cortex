@@ -1,27 +1,43 @@
-"""HomeOpsAdapter.get_vacuumops_settings() — the live kill-switch read.
+"""HomeOpsAdapter.get_vacuumops_settings() — the live settings read.
 
 Covers the adapter half of moving `opportunity_actuate` out of the source tree
 and into HomeOps `cortex_vacuumops_settings`, alongside the `mop_enabled` switch
-that made the same move earlier.
+that made the same move earlier and `prior_learner_enabled`, which joined them
+on 2026-09-16.
 
 THREE THINGS ARE UNDER TEST HERE AND THEY ARE DIFFERENT THINGS:
 
-  1. FAIL-CLOSED, PER FLAG. Every unreachable / non-2xx / malformed / missing /
-     wrong-typed case resolves that flag to False. Never raises (a settings
-     outage must not take down a dispatch tick), never truthy-coerces, never
-     defaults on.
+  1. EACH FLAG DEGRADES TO ITS OWN DOCUMENTED DEFAULT, PER FLAG. Every
+     unreachable / non-2xx / malformed / missing / wrong-typed case resolves
+     that flag — and only that flag — to its own default. Never raises (a
+     settings outage must not take down a dispatch tick) and never
+     truthy-coerces, in either direction.
 
-  2. ONE HTTP CALL FOR BOTH FLAGS. They live in one DB row and are needed on the
-     same tick. A request per flag would double the per-tick call count for no
-     added freshness and would let two flags that cannot disagree in the
-     database arrive from two different instants. Pinned by counting requests,
-     because "we meant to share the call" is not a property a reader can check.
+     ⚠ NOT "fail-closed, per flag ... never defaults on", which is what this
+     said. The "per flag" half was always right; "closed" was right for two
+     flags out of three. `mop_enabled` and `opportunity_actuate` are ACTUATION
+     gates and degrade to False. `prior_learner_enabled` gates a recorder and
+     degrades to TRUE — see §5 below, which has asserted exactly that, 400 lines
+     under a docstring claiming it could not happen.
 
-  3. `read_ok` SEPARATES "OFF" FROM "COULDN'T ASK". Both produce False, so
-     without this bit `r1.opportunity_check` could not honour its invariant 3
-     ("every degraded path names its degradation") — an outage would log as an
-     ordinary shadow tick and be invisible in exactly the place the §4.5 soak is
-     read from.
+     That contradiction is the fourth appearance of this same sentence: it was
+     corrected in the adapter's own docstring, then in `vacuumops_synth.py`
+     which calls it, and then here — the contract docstring of the test file
+     for the function itself.
+
+  2. ONE HTTP CALL FOR ALL THREE FLAGS. They live in one table and are needed on
+     the same tick. A request per flag would TRIPLE the per-tick call count for
+     no added freshness and would let flags that cannot disagree in the database
+     arrive from three different instants. Pinned by counting requests, because
+     "we meant to share the call" is not a property a reader can check.
+
+  3. `read_ok` SEPARATES "OFF" FROM "COULDN'T ASK". For the two gates both
+     produce False, so without this bit `r1.opportunity_check` could not honour
+     its invariant 3 ("every degraded path names its degradation") — an outage
+     would log as an ordinary shadow tick and be invisible in exactly the place
+     the §4.5 soak is read from. (For the learner the two are distinguishable by
+     value anyway, since "couldn't ask" resolves it True; `read_ok` is still the
+     bit that says which happened.)
 
 The existing mop-side coverage (test_mop.py::TestGetVacuumopsMopEnabledFailClosed)
 is deliberately left alone: it pins the single-flag wrapper's public contract,

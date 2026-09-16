@@ -465,10 +465,25 @@ def build_tick_config(
     through the mapping. `opportunity_actuate` is the second flag to make this
     journey and it must not repeat the first one's mistake.
 
-    ⚠ EVERY LIVE FLAG BELONGS HERE. If you add one to VacuumOpsLiveSettings,
-    map it in this function and assert it in
+    ⚠ EVERY LIVE FLAG THAT HAS A VacuumOpsConfig FIELD BELONGS HERE. If you add
+    one to VacuumOpsLiveSettings and it has a field to map into, map it in this
+    function and assert it in
     test_opportunity_check.py::TestLiveActuateWiring — otherwise the DB row will
     exist, the operator will flip it, and nothing will happen.
+
+    ⚠ THERE IS ONE DELIBERATE EXCEPTION, and it is not an oversight.
+    `prior_learner_enabled` is on VacuumOpsLiveSettings and is NOT mapped here,
+    because it has no VacuumOpsConfig field to map into — that field was deleted
+    once it had zero readers, on the same argument that deleted `dry_run`. Its
+    live value is threaded through a local (`live_prior_learner_enabled`) in
+    vacuumops_loop() instead, which is what the startup backfill and the
+    per-tick slot close-out actually branch on.
+
+    So the rule above is a conditional, not an absolute, and it used to be
+    written as an absolute directly above a flag that breaks it. If you are
+    adding a live flag, the question is not "must I map it here" but "does it
+    have a config field" — if it does not, mapping it here would create exactly
+    what this warning is about: a value that looks wired and controls nothing.
 
     Copy, never mutate: `base` is shared across every tick for the life of the
     process, so a flip must produce a new object rather than edit the one the
