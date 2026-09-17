@@ -4,8 +4,11 @@ Calls:
   GET  /api/vacuum/units             — parse zone scores from data[].zones[]
   POST /api/vacuum/trigger           — dispatch a mission
   POST /api/decisions/vacuumops      — log a decision entry (fire-and-forget)
-  GET  /api/cortex/vacuumops-settings — live kill switches, all fail-closed:
-       mop_enabled (mop-cadence gate) + opportunity_actuate (predictive patience)
+  GET  /api/cortex/vacuumops-settings — live switches, read in one call:
+       mop_enabled (mop-cadence gate) and opportunity_actuate (predictive
+       patience), both FAIL-CLOSED; prior_learner_enabled (occupancy learner),
+       which FAILS OPEN — see _bool_setting and
+       get_vacuumops_prior_learner_enabled()
 
 All calls use:
   Authorization: Bearer {settings.cortex_api_key}
@@ -36,7 +39,10 @@ from cortex_python.modules.vacuumops.schemas import DecisionEntry, ZoneInfo, Zon
 # that does not match is not an error anywhere — ctx.rooms.get() simply returns
 # None and the lookup degrades silently. "Master Bathroom" carried "master_bath"
 # against a tracked room named "master_bathroom" for months on exactly that basis.
-# test_homeops_adapter.py pins the two lists against each other.
+# tests/unit/vacuumops/test_homeops_adapter_zone_meta.py pins the two lists
+# against each other. (The old pointer named test_homeops_adapter.py, which has
+# never existed — a dangling reference found while auditing the ones this change
+# introduced. Same class of defect, so fixed rather than stepped over.)
 _ZONE_LABEL_TO_ROOM_KEY: dict[str, str | None] = {
     # Ethan 3F
     "Litter Box": None,
@@ -88,18 +94,44 @@ def _parse_ts(raw: object) -> datetime | None:
         return None
 
 
-def _bool_setting(data: dict[str, Any], key: str) -> bool:
-    """Read one kill switch out of the settings payload. Fail-CLOSED.
+def _bool_setting(data: dict[str, Any], key: str, *, default: bool = False) -> bool:
+    """Read one switch out of the settings payload, degrading to `default`.
 
-    ONLY a literal `True` is True. A missing key (HomeOps predates the column),
-    a null, and — importantly — the STRING "true" or the integer 1 all resolve
-    to False rather than being truthy-coerced: a flag that actuates real
-    hardware must not be turned on by a serialization accident.
+    ONLY a literal `True`/`False` is honoured. A missing key (HomeOps predates
+    the column), a null, and — importantly — the STRING "true" or the integer 1
+    all resolve to `default` rather than being truthy-coerced: a flag that
+    actuates real hardware must not be turned on by a serialization accident.
+
+    ── `default` is False for every ACTUATION gate, and must stay that way ────
+    `mop_enabled` and `opportunity_actuate` gate physical actions on real
+    floors, so they fail CLOSED: anything other than a confirmed `true` means
+    "do not actuate". That is not a style choice, it is the whole reason this
+    helper refuses truthy coercion.
+
+    The parameter exists for the ONE switch that is not an actuation gate —
+    `prior_learner_enabled`, which gates WRITES by the occupancy learner. Its
+    output IS read by a rule that can withhold a dispatch
+    (r1.opportunity_check), so the test is not "does anything consume it" but
+    WHICH WAY that consumer degrades: every degraded prior path there returns
+    PASS, so a problem with this flag can only fail to hold a robot back, never
+    release one that should have been held. "Stop on doubt" therefore protects
+    nothing here — and it costs something worse than the pause itself, because
+    stale priors never lose confidence and that rule keeps reading them.
+    See get_vacuumops_prior_learner_enabled() for the full argument.
+
+    ⚠ Do not pass `default=True` for anything that can move a robot — and check
+    the DEGRADED direction of every consumer before deciding it cannot. If you
+    have to think about whether a switch actuates, it does.
     """
     value = data.get(key)
     if not isinstance(value, bool):
-        log.warning("homeops_vacuumops_settings_flag_missing_or_not_bool", key=key, value=value)
-        return False
+        log.warning(
+            "homeops_vacuumops_settings_flag_missing_or_not_bool",
+            key=key,
+            value=value,
+            resolved_to=default,
+        )
+        return default
     return value
 
 
@@ -111,13 +143,18 @@ _HOMEOPS_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
 class VacuumOpsLiveSettings:
     """Every live, DB-backed VacuumOps kill switch, read in ONE round trip.
 
-    HomeOps serves all of these from a single row of `cortex_vacuumops_settings`
-    via one `GET /api/cortex/vacuumops-settings`, so CORTEX reads them together
-    rather than issuing a request per flag. Two flags today; the record exists so
-    a third costs a field rather than another per-tick HTTP call.
+    HomeOps serves all of these from `cortex_vacuumops_settings` via one
+    `GET /api/cortex/vacuumops-settings`, so CORTEX reads them together rather
+    than issuing a request per flag. Three flags today; the record exists so a
+    fourth costs a field rather than another per-tick HTTP call.
+
+    ⚠ NOT every flag here fails the same way, and the difference is deliberate.
+    `mop_enabled` and `opportunity_actuate` are ACTUATION gates and fail CLOSED.
+    `prior_learner_enabled` gates a passive collector and fails OPEN. Read
+    `_bool_setting`'s docstring before adding a fourth.
 
     ⚠ `read_ok` IS NOT "is anything enabled". It is "did we actually hear back
-    from HomeOps". Both booleans below fail CLOSED to False, which means a
+    from HomeOps". The two actuation gates fail CLOSED to False, which means a
     confirmed-off switch and an unreachable HomeOps produce byte-identical
     values — and those are different facts. The mop gate can live with the
     conflation (its shadow reason covers both), but `r1.opportunity_check` holds
@@ -130,6 +167,12 @@ class VacuumOpsLiveSettings:
 
     mop_enabled: bool = False
     opportunity_actuate: bool = False
+    # ⚠ Defaults TRUE, unlike everything else here. Passive collector, not an
+    # actuation gate — see `_bool_setting`'s docstring and
+    # `get_vacuumops_prior_learner_enabled()`. The dataclass default matters as
+    # much as the read default: a `VacuumOpsLiveSettings()` built for a degraded
+    # path must not silently report the learner as switched off.
+    prior_learner_enabled: bool = True
     read_ok: bool = False
 
 
@@ -214,42 +257,59 @@ class HomeOpsAdapter:
             return scores, zone_info, unit_dry_runs
 
     async def get_vacuumops_settings(self) -> VacuumOpsLiveSettings:
-        """Fetch every live, DB-backed VacuumOps kill switch in ONE round trip.
+        """Fetch every live, DB-backed VacuumOps switch in ONE round trip.
 
         GET /api/cortex/vacuumops-settings
         Response: { data: {
-            mop_enabled,          mop_enabled_updated_at,          mop_enabled_updated_by,
-            opportunity_actuate,  opportunity_actuate_updated_at,  opportunity_actuate_updated_by
+            mop_enabled,            mop_enabled_..._updated_at / _updated_by,
+            opportunity_actuate,    opportunity_actuate_... ,
+            prior_learner_enabled,  prior_learner_enabled_... ,
+            …plus the homeOps-side disruption keys, which CORTEX ignores
         } }
 
-        ONE CALL, NOT ONE PER FLAG. HomeOps serves both switches from the same
-        row of `cortex_vacuumops_settings`, and the loop needs both on the same
-        tick, so reading them separately would double the per-tick request count
-        for zero added freshness — and would additionally let the two flags come
-        from two different instants, which is a state the DB row cannot actually
-        be in. `get_vacuumops_mop_enabled()` and
-        `get_vacuumops_opportunity_actuate()` below are thin wrappers over this
-        method, kept for callers that want exactly one flag; the loop's per-tick
-        path calls this one.
+        ONE CALL, NOT ONE PER FLAG. HomeOps serves all of them from the same
+        table, and the loop needs them on the same tick, so reading them
+        separately would multiply the per-tick request count for zero added
+        freshness — and would let the flags come from different instants, a
+        state the table cannot actually be in. The three single-flag wrappers
+        below are thin wrappers over this method, kept for callers that want
+        exactly one; the loop's per-tick path calls this one.
 
         Called fresh every loop tick by vacuumops_synth.build_snapshot() — no
         cache/TTL on this side. The adaptive tick interval (60-300 s, see
-        loop.next_interval) is the only staleness bound, matching the existing
-        unit-level dry_run read path (get_zone_data(), same adapter, uncached
-        too).
+        loop.next_interval) is the only staleness bound.
 
-        Fail-CLOSED on every ambiguity, per flag independently:
-          - Network error / timeout / non-2xx status   -> all False, read_ok=False
-          - Malformed JSON / missing "data" object      -> all False, read_ok=False
-          - A key absent or not a bool                  -> THAT flag False, read_ok=True
-          - Confirmed True or False                     -> that value, no log noise
+        ⚠ FAIL DIRECTION IS PER FLAG, AND THEY ARE NOT ALL THE SAME.
+        This docstring asserted "fail-CLOSED on every ambiguity, per flag
+        independently" and then said so three more times in a bullet list. The
+        "per flag independently" half was right; "closed" was not, for one of
+        them, on every one of those paths:
 
-        Note the third case carefully: a HomeOps that answers but predates the
-        `opportunity_actuate` column is NOT a degraded read. We heard back, the
-        answer is "this switch does not exist here", and the fail-closed
-        interpretation of that is a confirmed off — so read_ok stays True. Only
-        "we never got an answer" clears read_ok. See VacuumOpsLiveSettings for
-        why the distinction is load-bearing rather than cosmetic.
+          ACTUATION GATES — `mop_enabled`, `opportunity_actuate` — fail CLOSED.
+          They decide whether software wets a floor or withholds a dispatch, so
+          anything other than a confirmed `true` means "do not actuate".
+
+          `prior_learner_enabled` fails OPEN. It gates a recorder, not an
+          actuator, and stale priors never lose confidence — a silently paused
+          learner keeps feeding "good" frozen data to a live withhold rule. See
+          get_vacuumops_prior_learner_enabled() for the full argument.
+
+        So, by case:
+          - Network error / timeout / non-2xx  -> gates False, learner True,
+                                                  read_ok=False
+          - Malformed JSON / missing "data"    -> gates False, learner True,
+                                                  read_ok=False
+          - A key absent or not a bool         -> THAT flag to ITS OWN default
+                                                  (gate False, learner True),
+                                                  read_ok=True
+          - Confirmed True or False            -> that value, no log noise
+
+        Note the third case carefully: a HomeOps that answers but predates a
+        column is NOT a degraded read. We heard back, the answer is "this switch
+        does not exist here", and each flag's default interpretation of that is
+        its own documented one — so read_ok stays True. Only "we never got an
+        answer" clears read_ok. See VacuumOpsLiveSettings for why the
+        distinction is load-bearing rather than cosmetic.
 
         Never raises — a HomeOps outage on this read must not take down the tick
         (zone scores are the only hard dependency; see build_snapshot's §8.5
@@ -274,6 +334,9 @@ class HomeOpsAdapter:
         return VacuumOpsLiveSettings(
             mop_enabled=_bool_setting(data, "mop_enabled"),
             opportunity_actuate=_bool_setting(data, "opportunity_actuate"),
+            # ⚠ default=True. The only fail-OPEN switch in this payload; see
+            # `_bool_setting` and `get_vacuumops_prior_learner_enabled()`.
+            prior_learner_enabled=_bool_setting(data, "prior_learner_enabled", default=True),
             read_ok=True,
         )
 
@@ -313,6 +376,76 @@ class HomeOpsAdapter:
         robot silently declining to clean because a settings read timed out.
         """
         return (await self.get_vacuumops_settings()).opportunity_actuate
+
+    async def get_vacuumops_prior_learner_enabled(self) -> bool:
+        """The live occupancy prior-learner switch. Fail-OPEN to True.
+
+        Thin wrapper over get_vacuumops_settings() — see that method for the
+        endpoint. ⚠ This is the ONE switch in this adapter whose failure
+        direction is inverted, so read why before copying the pattern.
+
+        Replaces CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED (2026-09-16), following
+        the same migration `mop_enabled` and `opportunity_actuate` already made.
+
+        ── Why fail OPEN, when everything else here fails closed ─────────────
+        ⚠ The reason is NOT "switching it off loses unrecoverable sample time".
+        That was this docstring's original justification and it is FALSE:
+        priors.py carries a watermark catch-up plus
+        `prior_learner_backfill_days: int = 28`, so any gap shorter than 28 days
+        is recovered automatically from HA recorder history. Nothing is
+        permanently lost by pausing the learner. Do not reinstate that claim.
+
+        The real reason is that STALE PRIORS NEVER LOSE CONFIDENCE:
+
+          1. `confidence_for(native_count, sample_count, min_slot_samples)` is
+             purely COUNT-based — there is no recency term anywhere in it — so a
+             learner left off for weeks keeps reporting `confidence: "good"` on
+             frozen data, indefinitely.
+          2. The one age-aware check downstream, `_read_forward_priors`'
+             `age_days`, measures from the OLDEST native observation and gates
+             learner MATURITY (the 14-day gate). So switching the learner off
+             makes that gate MORE satisfied as time passes — the single
+             staleness-adjacent signal in the system actively rewards the
+             failure rather than catching it.
+          3. Those priors are read every tick by r1.opportunity_check(), a live
+             rule that CAN withhold a dispatch on them.
+
+        So failing closed does not produce a quiet, obviously-degraded system.
+        It produces a CONFIDENTLY WRONG one: a live rule making comfort
+        decisions against a frozen dataset that still reads as fresh, with
+        nothing anywhere that would notice. A running learner is the only thing
+        keeping that consumer honest.
+
+        (Safe in the other sense too, though this is the weaker argument: every
+        degraded prior path in opportunity_check returns PASS — `r1.py:1046`,
+        `r1.py:1156` — so a read problem on this flag can only fail to HOLD A
+        ROBOT BACK, never release one that should have been held.)
+
+        Running it when it should have been off costs a few HA history calls
+        every 30 minutes, recoverable instantly by flipping the row.
+
+        Note this is not a weakening of the fail-closed rule; it is the same
+        rule — degrade to what the system did before the setting existed —
+        applied to a switch whose prior behaviour was `True` (the old env var's
+        default). For the actuation gates that rule and "fail closed" give the
+        same answer, which is why the distinction never had to be drawn until
+        now.
+
+        The HomeOps side agrees independently: `prior_learner_enabled` is the
+        only key in `cortex_vacuumops_settings` with a `fallback: true`, and
+        homeOps' own `readSettingBoolFailClosed()` REFUSES to serve it for this
+        exact reason.
+
+        ⚠ DEPLOY ORDER. This method reads a key that only exists after homeOps
+        migration `20260916020000` has run. Deploying THIS repo first is safe
+        but not free of consequence: until the row exists the key is simply
+        absent from the payload, `_bool_setting` resolves it to the `default=True`
+        above, and the learner runs exactly as it did before this change. So the
+        window degrades to pre-migration behaviour rather than to an outage —
+        but during it the HomeOps toggle does not yet exist, so the switch is
+        unflippable. Ship homeOps first and the window is zero.
+        """
+        return (await self.get_vacuumops_settings()).prior_learner_enabled
 
     async def get_zone_metadata(self) -> dict[int, ZoneMeta]:
         """Fetch per-zone structural metadata from HomeOps.

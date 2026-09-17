@@ -465,10 +465,25 @@ def build_tick_config(
     through the mapping. `opportunity_actuate` is the second flag to make this
     journey and it must not repeat the first one's mistake.
 
-    ⚠ EVERY LIVE FLAG BELONGS HERE. If you add one to VacuumOpsLiveSettings,
-    map it in this function and assert it in
+    ⚠ EVERY LIVE FLAG THAT HAS A VacuumOpsConfig FIELD BELONGS HERE. If you add
+    one to VacuumOpsLiveSettings and it has a field to map into, map it in this
+    function and assert it in
     test_opportunity_check.py::TestLiveActuateWiring — otherwise the DB row will
     exist, the operator will flip it, and nothing will happen.
+
+    ⚠ THERE IS ONE DELIBERATE EXCEPTION, and it is not an oversight.
+    `prior_learner_enabled` is on VacuumOpsLiveSettings and is NOT mapped here,
+    because it has no VacuumOpsConfig field to map into — that field was deleted
+    once it had zero readers, on the same argument that deleted `dry_run`. Its
+    live value is threaded through a local (`live_prior_learner_enabled`) in
+    vacuumops_loop() instead, which is what the startup backfill and the
+    per-tick slot close-out actually branch on.
+
+    So the rule above is a conditional, not an absolute, and it used to be
+    written as an absolute directly above a flag that breaks it. If you are
+    adding a live flag, the question is not "must I map it here" but "does it
+    have a config field" — if it does not, mapping it here would create exactly
+    what this warning is about: a value that looks wired and controls nothing.
 
     Copy, never mutate: `base` is shared across every tick for the life of the
     process, so a flip must produce a new object rather than edit the one the
@@ -1268,22 +1283,41 @@ async def vacuumops_loop(settings: Settings) -> None:
         max_catchup_slots=vacuumops_cfg.prior_learner_max_catchup_slots,
         max_lookback_days=vacuumops_cfg.prior_learner_backfill_days,
     )
-    if vacuumops_cfg.prior_learner_enabled:
+    # ⚠ Read the LIVE flag before the one-off startup backfill.
+    #
+    # There is no `vacuumops_cfg.prior_learner_enabled` to gate on — the field was
+    # deleted from VacuumOpsConfig (2026-09-16) once it had zero readers, for the
+    # same reason `dry_run` was. The value lives only on the live settings
+    # record. Gating a startup backfill on a static default would mean a learner
+    # deliberately switched off still ran a full backfill on every container
+    # restart: the "the UI says off and it happens anyway" shape this migration
+    # exists to remove.
+    #
+    # A dedicated call is fine HERE because this is once per process, not per
+    # tick. It fails OPEN to True, like every read of this flag.
+    live_prior_learner_enabled = await homeops_adapter.get_vacuumops_prior_learner_enabled()
+
+    if live_prior_learner_enabled:
         await _maybe_run_prior_backfill(
             prior_store, ha_adapter, redis_client, vacuumops_cfg, datetime.now(tz=UTC)
         )
 
     log.info(
         "vacuumops_loop.started",
-        dry_run=vacuumops_cfg.dry_run,
-        prior_learner_enabled=vacuumops_cfg.prior_learner_enabled,
-        # Neither kill switch is static config any more — both are read fresh
-        # from HomeOps every tick (see live_settings below), so there is nothing
-        # meaningful to log at startup beyond the source. Logged as two lines
-        # rather than one shared one so that grepping either flag's provenance
-        # finds it by name.
+        # No kill switch is static config any more — all three are read fresh
+        # from HomeOps (see live_settings below), so there is nothing meaningful
+        # to log at startup beyond the source and the value we booted on. Logged
+        # as separate fields rather than one shared one so that grepping any
+        # flag's provenance finds it by name.
+        #
+        # `dry_run` is deliberately absent: CORTEX_VACUUMOPS_DRY_RUN was deleted
+        # on 2026-09-16 and this log line was the ONLY place its value ever
+        # reached. Per-unit dry run (vac_units.dry_run) is the sole control and
+        # is logged per-dispatch where it actually applies.
         mop_enabled_source="homeops_db(live, per-tick)",
         opportunity_actuate_source="homeops_db(live, per-tick)",
+        prior_learner_enabled_source="homeops_db(live, per-tick)",
+        prior_learner_enabled_at_boot=live_prior_learner_enabled,
     )
 
     ctx: ContextSnapshot | None = None
@@ -1313,7 +1347,25 @@ async def vacuumops_loop(settings: Settings) -> None:
             # ticks and does no I/O at all on those. Wrapped despite
             # close_out_due_slots() being internally defensive — nothing in an
             # observability feature may ever kill a dispatch tick.
-            if vacuumops_cfg.prior_learner_enabled:
+            # ⚠ Uses the PREVIOUS tick's live value, deliberately.
+            #
+            # This flag is a DB row as of 2026-09-16, but the live settings for
+            # THIS tick do not exist yet — they arrive with build_snapshot()
+            # below, and this block runs before it on purpose (see the comment
+            # above: the learner is a calendar-bound sample clock and a degraded
+            # HomeOps must not be able to stall it).
+            #
+            # Reading the flag separately here would undo exactly that: it would
+            # put a HomeOps HTTP call in front of the one piece of work whose
+            # whole point is not depending on HomeOps being up right now. So the
+            # value carries over from the last successful snapshot instead,
+            # seeded True (fail-open) for the first tick.
+            #
+            # One tick of staleness is immaterial here in a way it would not be
+            # for an actuation gate: close_out_due_slots() is a no-op on ~29 of
+            # every 30 minutes of ticks, and the cost of one extra slot close-out
+            # after someone flips the switch off is a single row.
+            if live_prior_learner_enabled:
                 try:
                     await prior_learner.close_out_due_slots(tick_start)
                 except Exception as exc:
@@ -1323,17 +1375,24 @@ async def vacuumops_loop(settings: Settings) -> None:
             # build_snapshot returns (ctx, unit_dry_runs, live_settings):
             #   unit_dry_runs   dict[robot_name → dry_run bool], from HomeOps
             #                   vac_units.dry_run column.
-            #   live_settings   every live kill switch from HomeOps
+            #   live_settings   every live switch from HomeOps
             #                   cortex_vacuumops_settings, read in ONE call:
-            #                   mop_enabled (mop-cadence gate) and
-            #                   opportunity_actuate (predictive patience), plus
-            #                   read_ok. All fail-closed to False on any read
-            #                   problem — see HomeOpsAdapter
-            #                   .get_vacuumops_settings().
+            #                   mop_enabled (mop-cadence gate),
+            #                   opportunity_actuate (predictive patience) and
+            #                   prior_learner_enabled, plus read_ok.
+            #                   ⚠ They do NOT all fail the same way. The two
+            #                   actuation gates fail CLOSED to False; the prior
+            #                   learner fails OPEN to True because a paused
+            #                   learner leaves STALE priors that never lose
+            #                   confidence, feeding a live withhold rule. See
+            #                   HomeOpsAdapter.get_vacuumops_settings().
             try:
                 ctx, unit_dry_runs, live_settings = await build_snapshot(
                     tick_id, ha_adapter, homeops_adapter, settings
                 )
+                # Carry the learner flag to the NEXT tick's pre-snapshot block.
+                # See the ⚠ above that block for why it cannot read it directly.
+                live_prior_learner_enabled = live_settings.prior_learner_enabled
             except Exception as exc:
                 log.error("snapshot_build_failed", tick_id=tick_id, error=str(exc))
                 # Skip tick — zone score is required (§8.5)

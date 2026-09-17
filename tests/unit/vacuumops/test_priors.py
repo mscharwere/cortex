@@ -1122,31 +1122,53 @@ class TestPriorLearnerSettingsWiring:
     have to go through build_vacuumops_config(), which is what these do.
     """
 
-    def test_env_var_can_disable_the_learner(self, monkeypatch):
-        from cortex_python.modules.vacuumops.config import build_vacuumops_config
+    def test_the_env_var_is_retired_and_cannot_disable_the_learner(self, monkeypatch):
+        """CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED was migrated to the DB
+        (2026-09-16). A stale `=false` in an old .env must NOT still switch the
+        learner off — that would be the two-sources-of-truth state commit
+        bb0d47b removed for the per-unit dry_run flag, and the invisible-env-gate
+        state that made a DB kill switch inert for seven days on 2026-09-11.
+
+        Settings' `extra = "ignore"` means the stale entry is ignored rather
+        than a startup error, and build_vacuumops_config never reads it in.
+        """
+        from cortex_python.modules.vacuumops.config import (
+            VacuumOpsConfig,
+            build_vacuumops_config,
+        )
 
         settings = _settings_with(
             monkeypatch, CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED="false"
         )
-        assert build_vacuumops_config(settings).prior_learner_enabled is False
-
-    def test_env_var_can_enable_the_learner(self, monkeypatch):
-        from cortex_python.modules.vacuumops.config import build_vacuumops_config
-
-        settings = _settings_with(
-            monkeypatch, CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED="true"
-        )
-        assert build_vacuumops_config(settings).prior_learner_enabled is True
+        # Settings never picks it up …
+        assert not hasattr(settings, "cortex_vacuumops_prior_learner_enabled")
+        # … and there is no field on the module config for it to reach. The
+        # field was DELETED (2026-09-16) rather than left unwired: it had zero
+        # readers, and `dry_run` was deleted in this same change for having one.
+        # Asserting its ABSENCE is what stops it being reinstated as a
+        # live-looking value nothing consumes.
+        assert not hasattr(build_vacuumops_config(settings), "prior_learner_enabled")
+        assert not hasattr(VacuumOpsConfig(), "prior_learner_enabled")
 
     def test_defaults_on_when_unset(self, monkeypatch):
-        """Unlike mop_enabled, the learner defaults ON: it writes rows nothing
-        reads, so the cost of running it is a few HA calls per half hour, while
-        the cost of NOT running it is wall-clock time that cannot be recovered."""
-        from cortex_python.modules.vacuumops.config import build_vacuumops_config
+        """Unlike mop_enabled, the learner defaults ON — on the record that
+        actually carries it.
+
+        Running it costs a few HA calls per half hour. NOT running it freezes
+        the priors WITHOUT dropping their confidence — confidence_for() is
+        count-based — while r1.opportunity_check keeps withholding dispatches
+        from them. (Not "lost time": gaps under 28 days are back-filled.)
+
+        Asserted against VacuumOpsLiveSettings, which is where the live value
+        lives now. This used to assert against VacuumOpsConfig, a field nothing
+        read — so it pinned a default that could not have affected anything."""
+        from cortex_python.adapters.homeops_adapter import VacuumOpsLiveSettings
 
         monkeypatch.delenv("CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED", raising=False)
-        settings = _settings_with(monkeypatch)
-        assert build_vacuumops_config(settings).prior_learner_enabled is True
+        # True even on a record built for a DEGRADED read, which is the case
+        # that matters: a failed fetch must not report the learner as off.
+        assert VacuumOpsLiveSettings().prior_learner_enabled is True
+        assert VacuumOpsLiveSettings(read_ok=False).prior_learner_enabled is True
 
 
 class TestLearnerConfigDefaults:

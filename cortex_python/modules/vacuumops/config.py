@@ -36,9 +36,26 @@ class VacuumOpsConfig:
     robot_cooldown_overrides: dict[str, int] = field(default_factory=dict)
     # e.g. {"sam": 180} to give Sam a longer cooldown than Ethan.
 
-    # Dry-run toggle (env: CORTEX_VACUUMOPS_DRY_RUN). When True, loop evaluates
-    # and logs decisions but does NOT call /api/vacuum/trigger.
-    dry_run: bool = False
+    # ⚠ THERE IS NO `dry_run` FIELD HERE ANY MORE (2026-09-16). Do not add one.
+    #
+    # It carried CORTEX_VACUUMOPS_DRY_RUN and was documented as "when True, loop
+    # evaluates and logs decisions but does NOT call /api/vacuum/trigger". That
+    # description had stopped being true. Tracing the call chain: the value
+    # reached exactly ONE line — a startup log field in vacuumops_loop() — while
+    # every dispatch read `effective_dry_run = unit_dry_runs.get(robot, True)`
+    # from the per-unit `vac_units.dry_run` column, which loop.py's own comment
+    # calls "the sole control". Commit bb0d47b removed the global override
+    # deliberately; this field was its leftover shell, still advertising a
+    # behaviour it no longer had.
+    #
+    # It was considered for migration to the DB alongside prior_learner_enabled
+    # and REJECTED by Carlos (2026-09-16): reinstating it would resurrect the
+    # exact override bb0d47b removed, and give the HomeOps UI a switch labelled
+    # "dry run" that changed nothing but a log line. That is the 2026-09-11
+    # failure shape — a control the UI agrees is working while it does nothing —
+    # and a control that does not control is worse than no control.
+    #
+    # Per-unit dry run remains fully supported via `vac_units.dry_run`.
 
     # L1 confidence threshold for overflow queue (§7.3). L1 results with
     # confidence below this value defer conservatively (no AIT overflow in
@@ -113,24 +130,47 @@ class VacuumOpsConfig:
     # ── Rolling occupancy prior learner (priors.py, PR A1) ───────────────────
     # Spec: cortex_vacuum_patience_and_pause_resume_implementation_spec.md §4.2 + §7
     #
-    # The learner writes cortex_occupancy_priors and NOTHING reads it yet — PR A2's
-    # opportunity() is its only consumer. A1 ships alone and first because the
-    # learner's sample clock is the only calendar-bound item in the whole
-    # patience/pause-resume train: every other PR is engineering time, this one is
-    # wall-clock time, so it has to start accruing before the rest is built.
-
-    # Master switch. Env-wired (CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED) in
-    # build_vacuumops_config below — a kill switch that ships unwired is a known
-    # ARIIA finding in this module (finding 1 on the original mop_enabled env var:
-    # the field existed, the env var was documented, and nothing connected them).
-    # TestPriorLearnerSettingsWiring guards it through that function, which is the
-    # only place a test can catch that class of bug.
+    # The learner writes cortex_occupancy_priors. A1 shipped alone and first
+    # because the learner's sample clock is the only calendar-bound item in the
+    # whole patience/pause-resume train: every other PR is engineering time,
+    # this one is wall-clock time, so it had to start accruing before the rest
+    # was built.
     #
-    # Defaults TRUE, unlike mop_enabled. The asymmetry is deliberate and worth
-    # stating: mop_enabled actuates a physical wet pass on real floors and so is
-    # opt-in; the learner writes rows to a table nothing reads. Its worst failure
-    # mode is a wasted HA history call every 30 minutes.
-    prior_learner_enabled: bool = True
+    # ⚠ This block used to end "and NOTHING reads it yet — PR A2's opportunity()
+    # is its only consumer." That stopped being true when A2/A3 shipped and was
+    # never updated: r1.opportunity_check() reads these priors on every tick via
+    # OpportunityPriorSource, and can withhold a dispatch on them. Corrected
+    # 2026-09-16. (Point-in-time note written once and never re-checked — the
+    # "logged once ≠ tracked" shape, in a comment rather than a memory file.)
+
+    # ⚠ THERE IS NO `prior_learner_enabled` FIELD HERE ANY MORE (2026-09-16).
+    #
+    # The switch is real and live — HomeOps
+    # `cortex_vacuumops_settings.prior_learner_enabled`, GET/PATCH
+    # /api/cortex/vacuumops-settings — but it does not belong on THIS dataclass,
+    # and a field here would be worse than no field.
+    #
+    # It briefly existed, and reached ZERO readers. Nothing ever consumed
+    # `VacuumOpsConfig.prior_learner_enabled`: loop.py takes the live value off
+    # `VacuumOpsLiveSettings` and carries it in `live_prior_learner_enabled`,
+    # which is what both the startup backfill and the per-tick slot close-out
+    # actually branch on.
+    #
+    # `config_for_tick`'s own rule is "EVERY LIVE FLAG BELONGS HERE… otherwise
+    # the DB row will exist, the operator will flip it, and nothing will happen."
+    # That rule exists to protect flags something READS. Mapping a flag nothing
+    # reads would satisfy the letter of it while producing exactly the state it
+    # warns about: a field that looks wired and controls nothing.
+    #
+    # So it is deleted, for the same reason and by the same argument that
+    # deleted `dry_run` earlier in this very change — "a control that does not
+    # control is worse than no control". `dry_run` reached one line (a log
+    # field); this reached none. Treating them differently would have meant
+    # applying that argument only where it was discovered rather than where it
+    # is true.
+    #
+    # The live value's home is `VacuumOpsLiveSettings.prior_learner_enabled`
+    # (fail-OPEN — see HomeOpsAdapter.get_vacuumops_prior_learner_enabled()).
 
     # 30-minute slots => 48/day, 336/week/entity. CORTEX keeps its own table
     # precisely so it is not bound by HA's non-configurable
@@ -255,8 +295,9 @@ class VacuumOpsConfig:
     # (r1.opportunity_check). LIVE AND DB-BACKED, exactly like mop_enabled above
     # — same HomeOps table (`cortex_vacuumops_settings`), same endpoint
     # (GET/PATCH /api/cortex/vacuumops-settings), same single per-tick read
-    # (HomeOpsAdapter.get_vacuumops_settings() returns both flags in one round
-    # trip), same `dataclasses.replace()` threading in loop.vacuumops_loop().
+    # (HomeOpsAdapter.get_vacuumops_settings() returns all three flags, plus
+    # read_ok, in one round trip), same `dataclasses.replace()` threading in
+    # loop.vacuumops_loop().
     # NOT env-sourced, and deliberately NOT set by build_vacuumops_config().
     #
     # WHAT MOVED, AND WHY IT MOVED HERE RATHER THAN STAYING ON THE JOB.
@@ -351,14 +392,22 @@ def build_vacuumops_config(settings: Settings) -> VacuumOpsConfig:
     are not env-sourced. See their field docstrings above for the live DB-backed
     mechanism; the per-tick wiring lives in loop.vacuumops_loop(), and its
     regression coverage lives in TestLivePerTickWiring (test_mop.py) and
-    TestLiveActuateWiring (test_opportunity_check.py), analogous to what
-    TestSettingsWiring does for the fields that remain env-sourced.
+    TestLiveActuateWiring (test_opportunity_check.py).
+
+    `prior_learner_enabled` is not here either, and has no field on this
+    dataclass at all — see the note where it used to be. Its live value lives on
+    VacuumOpsLiveSettings; its coverage is TestPriorLearnerFailsOpen in
+    tests/unit/vacuumops/test_vacuumops_live_settings.py.
 
     The dataclass defaults for both are the fallback for direct construction
     only (tests, or a code path that never receives a live value) and are never
     the values the running loop actually dispatches on.
+
+    ⚠ As of 2026-09-16 this function sources NOTHING from the environment, so it
+    returns a bare default config. It is deliberately KEPT rather than deleted:
+    it is the named seam the "kill switch shipped unwired" ARIIA finding is
+    guarded at, and the next env-sourced field — if there ever is one — must be
+    wired here and asserted in TestSettingsWiring rather than read inline
+    somewhere in the loop.
     """
-    return VacuumOpsConfig(
-        dry_run=settings.cortex_vacuumops_dry_run,
-        prior_learner_enabled=settings.cortex_vacuumops_prior_learner_enabled,
-    )
+    return VacuumOpsConfig()

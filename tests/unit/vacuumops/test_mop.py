@@ -690,14 +690,26 @@ class TestJobScoping:
         assert d.reason == "off:no_zone_due"
 
 
-# ── §7: settings wiring — dry_run is still env-sourced ───────────────────────
+# ── §7: settings wiring — NOTHING is env-sourced here any more ───────────────
 #
 # Regression guard for ARIIA finding 1: CORTEX_VACUUMOPS_MOP_ENABLED was
 # documented and the dataclass field existed, but nothing connected them —
 # loop.py constructed VacuumOpsConfig(dry_run=...) only, so the switch was dead.
-# The original tests missed it because they built VacuumOpsConfig directly.
-# mop_enabled is no longer env-sourced at all (see §7b below for its
-# replacement coverage) — dry_run is the one field remaining here.
+# The original tests missed it because they built VacuumOpsConfig directly,
+# which is why these go through build_vacuumops_config().
+#
+# ⚠ This header used to read "dry_run is still env-sourced" and "dry_run is the
+# one field remaining here". Both became false on 2026-09-16 — and were
+# contradicted by `test_dry_run_is_gone_entirely` twenty lines below, in the
+# very section they introduced. As of that date NO VacuumOps field is
+# env-sourced: mop_enabled and opportunity_actuate are live DB settings (§7b),
+# prior_learner_enabled is a live DB setting with no dataclass field at all, and
+# dry_run is deleted outright.
+#
+# The section is KEPT, empty of env-sourced fields, because it is the named seam
+# the "kill switch shipped unwired" finding is guarded at: the next field that
+# IS env-sourced must be wired in build_vacuumops_config() and asserted here,
+# rather than read inline somewhere in the loop.
 
 
 _REQUIRED_ENV = {
@@ -717,12 +729,51 @@ def _settings_with(monkeypatch, **overrides):
 
 
 class TestSettingsWiring:
-    def test_dry_run_still_wired(self, monkeypatch):
-        """Guard the pre-existing field against the same class of regression."""
-        from cortex_python.modules.vacuumops.config import build_vacuumops_config
+    def test_dry_run_is_gone_entirely(self, monkeypatch):
+        """CORTEX_VACUUMOPS_DRY_RUN was DELETED, not migrated (2026-09-16).
+
+        It was already vestigial: the value reached exactly one startup log
+        field, while every dispatch read the per-unit `vac_units.dry_run`
+        column, which loop.py calls "the sole control". Commit bb0d47b removed
+        the global override deliberately; the field was its leftover shell.
+
+        Reinstating it — as an env var OR as a DB setting — would resurrect that
+        override and, in the DB case, put a switch labelled "dry run" in the
+        HomeOps UI that changed nothing but a log line. That is the 2026-09-11
+        failure shape exactly, so this asserts the field cannot come back by
+        either route.
+        """
+        from cortex_python.modules.vacuumops.config import (
+            VacuumOpsConfig,
+            build_vacuumops_config,
+        )
 
         settings = _settings_with(monkeypatch, CORTEX_VACUUMOPS_DRY_RUN="true")
-        assert build_vacuumops_config(settings).dry_run is True
+        cfg = build_vacuumops_config(settings)
+        assert not hasattr(cfg, "dry_run")
+        assert not hasattr(VacuumOpsConfig(), "dry_run")
+        # Settings' `extra = "ignore"` means a stale entry in an old .env is
+        # harmlessly ignored rather than a startup error.
+        assert not hasattr(settings, "cortex_vacuumops_dry_run")
+
+    def test_build_vacuumops_config_sources_nothing_from_the_environment(
+        self, monkeypatch
+    ):
+        """As of 2026-09-16 no VacuumOps field is env-sourced.
+
+        The function is deliberately KEPT rather than deleted: it is the named
+        seam the "kill switch shipped unwired" ARIIA finding is guarded at, and
+        the next env-sourced field must be wired here rather than read inline in
+        the loop. This pins that it currently returns a bare default config, so
+        adding a field without wiring it is visible here.
+        """
+        from cortex_python.modules.vacuumops.config import (
+            VacuumOpsConfig,
+            build_vacuumops_config,
+        )
+
+        settings = _settings_with(monkeypatch)
+        assert build_vacuumops_config(settings) == VacuumOpsConfig()
 
     def test_build_vacuumops_config_does_not_read_the_retired_env_var(
         self, monkeypatch

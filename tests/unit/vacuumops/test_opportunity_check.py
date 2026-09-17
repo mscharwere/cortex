@@ -1320,9 +1320,58 @@ class TestPerJobFlags:
         assert VacuumOpsConfig().opportunity_actuate is False
         assert VacuumOpsConfig().opportunity_actuate_degraded is False
 
-        settings = MagicMock(spec=Settings)
-        settings.cortex_vacuumops_dry_run = False
-        settings.cortex_vacuumops_prior_learner_enabled = True
+        # ⚠ `spec_set`, not `spec`. `spec=` restricts attribute READS; it lets a
+        # write to a field the real class does not have succeed silently. This
+        # block used to set `cortex_vacuumops_dry_run` and
+        # `cortex_vacuumops_prior_learner_enabled` — both deleted from Settings
+        # by this change, and both asserted absent elsewhere in the suite — and
+        # the writes went on passing because nothing was checking.
+        #
+        # The dead lines are gone AND the mock is tightened, because removing
+        # them alone would leave the trap for the next one: with `spec_set`, a
+        # write to a retired setting raises AttributeError instead of quietly
+        # configuring nothing.
+        #
+        # ⚠ Be exact about what that buys, because two tempting descriptions are
+        # both wrong — including the one an earlier version of this comment gave.
+        #
+        # `spec_set` against a pydantic model blocks every attribute WRITE, and
+        # every READ of a field that is not a class attribute too. Settings'
+        # fields are instance state, so `m.cortex_api_key` raises as readily as
+        # a write does. This is a NO-ACCESS stand-in, not a "read-only" one —
+        # the earlier wording. It is usable HERE only because this test neither
+        # reads nor writes any setting after the cleanup; `build_vacuumops_config`
+        # now sources nothing from the environment and touches none of them.
+        #
+        # ⚠ And do NOT reach for `spec=` or `create_autospec` in a test that must
+        # set a real field. Both have the EXACT hole this fix exists to close:
+        # verified directly, each silently accepts
+        # `m.cortex_vacuumops_dry_run = False` for a field Settings does not
+        # have. Recommending them would reproduce the bug one test over.
+        #
+        # The thing that actually fails loud is a REAL instance — but not the
+        # one an earlier version of this comment gave, which did not run:
+        # `Settings(DATABASE_URL=...)` raises "database_url Field required",
+        # because `case_sensitive` governs ENV-VAR resolution, not __init__
+        # kwargs, and `extra="ignore"` then silently drops the uppercase ones.
+        # The claimed exception type was wrong too: assignment to an unknown
+        # field raises plain ValueError, not ValidationError, because
+        # `validate_assignment` is not enabled.
+        #
+        # Use the pattern this suite already has — `_settings_with(monkeypatch)`
+        # in test_mop.py, which sets the env vars and builds
+        # `Settings(_env_file=None)`. Verified end to end before writing it down:
+        #
+        #     s = _settings_with(monkeypatch)
+        #     s.cortex_api_key = "x"                    # real field: fine
+        #     with pytest.raises(ValueError):
+        #         s.cortex_vacuumops_dry_run = False    # retired field: raises
+        #
+        # ⚠ That verification is the point, not a flourish. This comment has now
+        # been wrong three times — "read-only stand-in", "use spec= instead",
+        # and an example that did not execute — each time because the claim
+        # sounded right and nobody ran it. Run the next one.
+        settings = MagicMock(spec_set=Settings)
         assert build_vacuumops_config(settings).opportunity_actuate is False
 
     def test_the_active_roster_matches(self) -> None:

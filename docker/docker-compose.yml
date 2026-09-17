@@ -56,8 +56,13 @@ services:
       # Home Assistant
       HOMEASSISTANT_URL: ${HOMEASSISTANT_URL:-https://homeassistant.perwnet.com:8123}
       HOMEASSISTANT_TOKEN: ${HOMEASSISTANT_TOKEN}
-      # VacuumOps module
-      CORTEX_VACUUMOPS_DRY_RUN: ${CORTEX_VACUUMOPS_DRY_RUN:-true}
+      # VacuumOps module — NO env vars. Both that used to sit here were retired
+      # on 2026-09-16: CORTEX_VACUUMOPS_DRY_RUN (deleted; per-unit
+      # vac_units.dry_run is the sole control) and
+      # CORTEX_VACUUMOPS_PRIOR_LEARNER_ENABLED (now a live HomeOps DB setting).
+      # Passing either here would inject a variable nothing reads — a container
+      # that looks configured and is not, which is the failure shape this module
+      # has now hit twice in production.
     ports:
       # cortex-python is the only service that exposes a host port.
       # Reverse-proxy (Synology + Tailscale) fronts this.
